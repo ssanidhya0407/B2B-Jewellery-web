@@ -1,0 +1,103 @@
+
+> b2b-jewellery-platform@1.0.0 dev
+> turbo dev
+
+• turbo 2.8.3
+• Packages in scope: @jewellery/api, @jewellery/dashboard, @jewellery/database, @jewellery/shared, @jewellery/web
+• Running dev in 5 packages
+• Remote caching disabled
+@jewellery/database:dev: cache bypass, force executing 38b19848741901e5
+@jewellery/shared:dev: cache bypass, force executing d6e56131eb60a891
+@jewellery/dashboard:dev: cache bypass, force executing b4553e16fa8e5091
+@jewellery/api:dev: cache bypass, force executing d76d11a36a9315e6
+@jewellery/web:dev: cache bypass, force executing 9a0afcf13aebe631
+@jewellery/dashboard:dev: 
+@jewellery/dashboard:dev: > @jewellery/dashboard@1.0.0 dev
+@jewellery/dashboard:dev: > next dev -p 3002
+@jewellery/dashboard:dev: 
+@jewellery/api:dev: 
+@jewellery/api:dev: > @jewellery/api@1.0.0 dev
+@jewellery/api:dev: > nest start --watch
+@jewellery/api:dev: 
+@jewellery/web:dev: 
+@jewellery/web:dev: > @jewellery/web@1.0.0 dev
+@jewellery/web:dev: > next dev -p 3000
+@jewellery/web:dev: 
+@jewellery/database:dev: 
+@jewellery/database:dev: > @jewellery/database@1.0.0 dev
+@jewellery/database:dev: > tsup src/index.ts --format cjs,esm --dts --watch
+@jewellery/database:dev: 
+@jewellery/shared:dev: 
+@jewellery/shared:dev: > @jewellery/shared@1.0.0 dev
+@jewellery/shared:dev: > tsup src/index.ts --format cjs,esm --dts --watch
+@jewellery/shared:dev: 
+@jewellery/database:dev: CLI Building entry: src/index.ts
+@jewellery/database:dev: CLI Using tsconfig: tsconfig.json
+@jewellery/database:dev: CLI tsup v8.5.1
+@jewellery/database:dev: CLI Running in watch mode
+@jewellery/shared:dev: CLI Building entry: src/index.ts
+@jewellery/database:dev: CLI Target: es2022
+@jewellery/database:dev: CJS Build start
+@jewellery/shared:dev: CLI Using tsconfig: tsconfig.json
+@jewellery/database:dev: ESM Build start
+@jewellery/shared:dev: CLI tsup v8.5.1
+@jewellery/shared:dev: CLI Running in watch mode
+@jewellery/shared:dev: CLI Target: es2022
+@jewellery/shared:dev: CJS Build start
+@jewellery/shared:dev: ESM Build start
+@jewellery/database:dev: ESM dist/index.mjs 314.00 B
+@jewellery/database:dev: ESM ⚡️ Build success in 26ms
+@jewellery/database:dev: CJS dist/index.js 1.36 KB
+@jewellery/database:dev: CJS ⚡️ Build success in 27ms
+@jewellery/shared:dev: CJS dist/index.js 9.91 KB
+@jewellery/shared:dev: CJS ⚡️ Build success in 26ms
+@jewellery/shared:dev: ESM dist/index.mjs 7.68 KB
+@jewellery/shared:dev: ESM ⚡️ Build success in 26ms
+@jewellery/database:dev: CLI Watching for changes in "."
+@jewellery/database:dev: CLI Ignoring changes in "**/{.git,node_modules}/**" | "dist"
+@jewellery/shared:dev: CLI Watching for changes in "."
+@jewellery/shared:dev: CLI Ignoring changes in "**/{.git,node_modules}/**" | "dist"
+@jewellery/web:dev:  ⨯ Failed to start server
+@jewellery/web:dev: Error: listen EADDRINUSE: address already in use :::3000
+@jewellery/web:dev:     at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+@jewellery/web:dev:     at listenInCluster (node:net:1997:12)
+@jewellery/web:dev:     at Server.listen (node:net:2102:7)
+@jewellery/web:dev:     at /Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:280:16
+@jewellery/web:dev:     at new Promise (<anonymous>)
+@jewellery/web:dev:     at startServer (/Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:191:11)
+@jewellery/web:dev:     at /Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:310:52
+@jewellery/web:dev:     at Span.traceAsyncFn (/Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/trace/trace.js:154:26)
+@jewellery/web:dev:     at process.<anonymous> (/Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:310:35)
+@jewellery/web:dev:     at process.emit (node:events:508:28) {
+@jewellery/web:dev:   code: 'EADDRINUSE',
+@jewellery/web:dev:   errno: -48,
+@jewellery/web:dev:   syscall: 'listen',
+@jewellery/web:dev:   address: '::',
+@jewellery/web:dev:   port: 3000
+@jewellery/web:dev: }
+@jewellery/dashboard:dev:  ⨯ Failed to start server
+@jewellery/dashboard:dev: Error: listen EADDRINUSE: address already in use :::3002
+@jewellery/dashboard:dev:     at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+@jewellery/dashboard:dev:     at listenInCluster (node:net:1997:12)
+@jewellery/dashboard:dev:     at Server.listen (node:net:2102:7)
+@jewellery/dashboard:dev:     at /Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:280:16
+@jewellery/dashboard:dev:     at new Promise (<anonymous>)
+@jewellery/dashboard:dev:     at startServer (/Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:191:11)
+@jewellery/dashboard:dev:     at /Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:310:52
+@jewellery/dashboard:dev:     at Span.traceAsyncFn (/Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/trace/trace.js:154:26)
+@jewellery/dashboard:dev:     at process.<anonymous> (/Users/admin1/Documents/web/b2bjewellerary /node_modules/next/dist/server/lib/start-server.js:310:35)
+@jewellery/dashboard:dev:     at process.emit (node:events:508:28) {
+@jewellery/dashboard:dev:   code: 'EADDRINUSE',
+@jewellery/dashboard:dev:   errno: -48,
+@jewellery/dashboard:dev:   syscall: 'listen',
+@jewellery/dashboard:dev:   address: '::',
+@jewellery/dashboard:dev:   port: 3002
+@jewellery/dashboard:dev: }
+@jewellery/dashboard:dev: [?25h
+@jewellery/web:dev: [?25h
+@jewellery/shared:dev: DTS Build start
+@jewellery/database:dev: DTS Build start
+@jewellery/api:dev: [2J[3J[H[[90m1:15:50 PM[0m] Starting compilation in watch mode...
+@jewellery/api:dev: 
+@jewellery/shared:dev: DTS ⚡️ Build success in 1041ms
+@jewellery/database:dev: DTS ⚡️ Build success in 1164ms

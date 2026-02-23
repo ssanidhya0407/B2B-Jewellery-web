@@ -1,0 +1,741 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ============================================
+// USER MANAGEMENT
+// ============================================
+
+enum UserType {
+  external
+  sales
+  operations
+  admin
+}
+
+enum JewelleryCategory {
+  ring
+  necklace
+  earring
+  bracelet
+  pendant
+  bangle
+  other
+}
+
+model User {
+  id             String   @id @default(uuid()) @db.Uuid
+  email          String   @unique @db.VarChar(255)
+  passwordHash   String   @map("password_hash") @db.VarChar(255)
+  userType       UserType @map("user_type")
+  companyName    String?  @map("company_name") @db.VarChar(255)
+  firstName      String?  @map("first_name") @db.VarChar(100)
+  lastName       String?  @map("last_name") @db.VarChar(100)
+  phone          String?  @db.VarChar(50)
+  commissionRate Decimal? @map("commission_rate") @db.Decimal(5, 2)
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  imageSessions        ImageSession[]
+  intendedCarts        IntendedCart[]
+  quotationsCreated    Quotation[]
+  marginConfigurations MarginConfiguration[]
+  buyerOrders          Order[]               @relation("buyer_orders")
+  salesOrders          Order[]               @relation("sales_orders")
+  commissions          Commission[]
+  notifications        Notification[]
+  messages             Message[]
+  confirmedPayments    Payment[]
+  negotiationsOpened   Negotiation[]         @relation("negotiations_opened")
+  negotiationRounds    NegotiationRound[]    @relation("negotiation_rounds_proposed")
+  validatedCartItems   CartItem[]            @relation("cart_items_validated")
+  assignedCarts        IntendedCart[]        @relation("carts_assigned_to_sales")
+  validatedCarts       IntendedCart[]        @relation("carts_validated_by_ops")
+
+  @@map("users")
+}
+
+// ============================================
+// IMAGE PROCESSING
+// ============================================
+
+enum SessionStatus {
+  processing
+  analyzed
+  recommendations_ready
+  failed
+}
+
+model ImageSession {
+  id               String            @id @default(uuid()) @db.Uuid
+  userId           String            @map("user_id") @db.Uuid
+  selectedCategory JewelleryCategory @default(other) @map("selected_category")
+  originalImageUrl String            @map("original_image_url")
+  thumbnailUrl     String?           @map("thumbnail_url")
+  sessionStatus    SessionStatus     @default(processing) @map("session_status")
+  maxUnitPrice     Decimal?          @map("max_unit_price") @db.Decimal(10, 2)
+  geminiAttributes Json?             @map("gemini_attributes") @db.JsonB
+  userContext      String?           @map("user_context")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  embedding         ImageEmbedding?
+  recommendationSet RecommendationSet?
+  intendedCarts     IntendedCart[]
+
+  @@map("image_sessions")
+}
+
+model ImageEmbedding {
+  id             String                     @id @default(uuid()) @db.Uuid
+  imageSessionId String                     @unique @map("image_session_id") @db.Uuid
+  embedding      Unsupported("vector(512)")
+  createdAt      DateTime                   @default(now()) @map("created_at")
+
+  // Relations
+  imageSession ImageSession @relation(fields: [imageSessionId], references: [id], onDelete: Cascade)
+
+  @@map("image_embeddings")
+}
+
+// ============================================
+// INVENTORY & CATALOGS
+// ============================================
+
+model InventorySku {
+  id                String                      @id @default(uuid()) @db.Uuid
+  skuCode           String                      @unique @map("sku_code") @db.VarChar(100)
+  name              String                      @db.VarChar(255)
+  description       String?
+  category          String                      @db.VarChar(50)
+  primaryMetal      String?                     @map("primary_metal") @db.VarChar(50)
+  stoneTypes        String[]                    @map("stone_types")
+  stonePresence     String?                     @map("stone_presence") @db.VarChar(20)
+  primaryShape      String?                     @map("primary_shape") @db.VarChar(50)
+  style             String?                     @db.VarChar(50)
+  complexity        String?                     @db.VarChar(20)
+  baseCost          Decimal                     @map("base_cost") @db.Decimal(10, 2)
+  moq               Int                         @default(1)
+  leadTimeDays      Int?                        @map("lead_time_days")
+  availableQuantity Int                         @default(0) @map("available_quantity")
+  imageUrl          String                      @map("image_url")
+  embedding         Unsupported("vector(512)")?
+  isActive          Boolean                     @default(true) @map("is_active")
+  createdAt         DateTime                    @default(now()) @map("created_at")
+  updatedAt         DateTime                    @updatedAt @map("updated_at")
+
+  // Relations
+  recommendationItems RecommendationItem[]
+
+  @@map("inventory_skus")
+}
+
+// ============================================
+// MANUFACTURERS (3rd-party manufacturer profiles)
+// ============================================
+
+model Manufacturer {
+  id              String   @id @default(uuid()) @db.Uuid
+  companyName     String   @map("company_name") @db.VarChar(255)
+  contactPerson   String?  @map("contact_person") @db.VarChar(255)
+  email           String?  @db.VarChar(255)
+  phone           String?  @db.VarChar(50)
+  address         String?
+  city            String?  @db.VarChar(100)
+  country         String?  @db.VarChar(100)
+  website         String?  @db.VarChar(500)
+  description     String?
+  categories      String[] @default([])
+  specializations String[] @default([])
+  qualityTier     String   @default("standard") @map("quality_tier") @db.VarChar(20) // standard | premium | luxury
+  minOrderValue   Decimal? @map("min_order_value") @db.Decimal(12, 2)
+  avgLeadTimeDays Int?     @map("avg_lead_time_days")
+  logoUrl         String?  @map("logo_url") @db.VarChar(500)
+  isVerified      Boolean  @default(false) @map("is_verified")
+  isActive        Boolean  @default(true) @map("is_active")
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  products   ManufacturerCatalog[]
+  orderItems OrderItem[]
+
+  @@map("manufacturers")
+}
+
+model ManufacturerCatalog {
+  id              String                      @id @default(uuid()) @db.Uuid
+  manufacturerId  String?                     @map("manufacturer_id") @db.Uuid
+  source          String                      @default("manufacturer") @db.VarChar(30) // "manufacturer" | "alibaba"
+  manufacturerRef String?                     @map("manufacturer_ref") @db.VarChar(255)
+  name            String                      @db.VarChar(255)
+  description     String?
+  category        String                      @db.VarChar(50)
+  primaryMetal    String?                     @map("primary_metal") @db.VarChar(50)
+  stoneTypes      String[]                    @map("stone_types")
+  baseCostMin     Decimal?                    @map("base_cost_min") @db.Decimal(10, 2)
+  baseCostMax     Decimal?                    @map("base_cost_max") @db.Decimal(10, 2)
+  moq             Int                         @default(50)
+  leadTimeDays    Int?                        @map("lead_time_days")
+  imageUrl        String?                     @map("image_url")
+  embedding       Unsupported("vector(512)")?
+  qualityTier     String                      @default("standard") @map("quality_tier") @db.VarChar(20)
+  isVerified      Boolean                     @default(false) @map("is_verified")
+  stockStatus     String                      @default("unknown") @map("stock_status") @db.VarChar(20) // in_stock | low_stock | out_of_stock | made_to_order | unknown
+  lastStockCheck  DateTime?                   @map("last_stock_check")
+  createdAt       DateTime                    @default(now()) @map("created_at")
+  updatedAt       DateTime                    @updatedAt @map("updated_at")
+
+  // Relations
+  manufacturer        Manufacturer?          @relation(fields: [manufacturerId], references: [id], onDelete: SetNull)
+  recommendationItems RecommendationItem[]
+
+  @@map("manufacturer_catalog")
+}
+
+model DesignPattern {
+  id              String                      @id @default(uuid()) @db.Uuid
+  patternCode     String                      @unique @map("pattern_code") @db.VarChar(100)
+  category        String                      @db.VarChar(50)
+  primaryShape    String?                     @map("primary_shape") @db.VarChar(50)
+  stoneDensity    String?                     @map("stone_density") @db.VarChar(20)
+  metalVisibility String?                     @map("metal_visibility") @db.VarChar(20)
+  finish          String?                     @db.VarChar(50)
+  occasion        String?                     @db.VarChar(50)
+  embedding       Unsupported("vector(512)")?
+  referenceCount  Int                         @default(0) @map("reference_count")
+  createdAt       DateTime                    @default(now()) @map("created_at")
+
+  @@map("design_patterns")
+}
+
+// ============================================
+// RECOMMENDATIONS
+// ============================================
+
+enum SourceType {
+  inventory
+  manufacturer
+  alibaba
+}
+
+model RecommendationSet {
+  id                      String   @id @default(uuid()) @db.Uuid
+  sessionId               String   @unique @map("session_id") @db.Uuid
+  primaryRecommendationId String?  @map("primary_recommendation_id") @db.Uuid
+  createdAt               DateTime @default(now()) @map("created_at")
+
+  // Relations
+  session ImageSession         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  items   RecommendationItem[]
+
+  @@map("recommendation_sets")
+}
+
+model RecommendationItem {
+  id                  String     @id @default(uuid()) @db.Uuid
+  recommendationSetId String     @map("recommendation_set_id") @db.Uuid
+  sourceType          SourceType @map("source_type")
+  inventorySkuId      String?    @map("inventory_sku_id") @db.Uuid
+  manufacturerItemId  String?    @map("manufacturer_item_id") @db.Uuid
+  isPrimary           Boolean    @default(false) @map("is_primary")
+  similarityScore     Decimal?   @map("similarity_score") @db.Decimal(5, 4)
+  displayPriceMin     Decimal?   @map("display_price_min") @db.Decimal(10, 2)
+  displayPriceMax     Decimal?   @map("display_price_max") @db.Decimal(10, 2)
+  displayMoq          Int?       @map("display_moq")
+  displayLeadTime     String?    @map("display_lead_time") @db.VarChar(50)
+  createdAt           DateTime   @default(now()) @map("created_at")
+
+  // Relations
+  recommendationSet RecommendationSet    @relation(fields: [recommendationSetId], references: [id], onDelete: Cascade)
+  inventorySku      InventorySku?        @relation(fields: [inventorySkuId], references: [id])
+  manufacturerItem  ManufacturerCatalog? @relation(fields: [manufacturerItemId], references: [id])
+  cartItems         CartItem[]
+
+  @@map("recommendation_items")
+}
+
+// ============================================
+// CART & ORDERS
+// ============================================
+
+enum CartStatus {
+  draft
+  submitted
+  under_review
+  quoted
+  closed
+}
+
+model IntendedCart {
+  id          String     @id @default(uuid()) @db.Uuid
+  userId      String     @map("user_id") @db.Uuid
+  sessionId   String?    @map("session_id") @db.Uuid
+  status      CartStatus @default(draft)
+  notes       String?
+  createdAt   DateTime   @default(now()) @map("created_at")
+  submittedAt DateTime?  @map("submitted_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  // Phase 2 — Operations validation & assignment
+  assignedSalesId  String?   @map("assigned_sales_id") @db.Uuid
+  assignedAt       DateTime? @map("assigned_at")
+  validatedByOpsId String?   @map("validated_by_ops_id") @db.Uuid
+  validatedAt      DateTime? @map("validated_at")
+
+  // Relations
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  session         ImageSession? @relation(fields: [sessionId], references: [id])
+  assignedSales   User?         @relation("carts_assigned_to_sales", fields: [assignedSalesId], references: [id])
+  validatedByOps  User?         @relation("carts_validated_by_ops", fields: [validatedByOpsId], references: [id])
+  items           CartItem[]
+  quotations      Quotation[]
+  messages        Message[]
+
+  @@map("intended_carts")
+}
+
+model CartItem {
+  id                   String   @id @default(uuid()) @db.Uuid
+  cartId               String   @map("cart_id") @db.Uuid
+  recommendationItemId String   @map("recommendation_item_id") @db.Uuid
+  quantity             Int      @default(1)
+  itemNotes            String?  @map("item_notes")
+  addedAt              DateTime @default(now()) @map("added_at")
+
+  // Inventory validation (Phase 2 — Ops validates)
+  inventoryStatus    String?   @map("inventory_status") @db.VarChar(30) // in_stock | low_stock | out_of_stock | available | made_to_order | unavailable
+  availableSource    String?   @map("available_source") @db.VarChar(30) // internal | manufacturer | alibaba
+  validatedQuantity  Int?      @map("validated_quantity")
+  operationsNotes    String?   @map("operations_notes")
+  validatedAt        DateTime? @map("validated_at")
+  validatedById      String?   @map("validated_by_id") @db.Uuid
+
+  // Relations
+  cart                  IntendedCart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  recommendationItem    RecommendationItem     @relation(fields: [recommendationItemId], references: [id])
+  validatedBy           User?                  @relation("cart_items_validated", fields: [validatedById], references: [id])
+  quotationItems        QuotationItem[]
+  negotiationRoundItems NegotiationRoundItem[]
+
+  @@map("cart_items")
+}
+
+// ============================================
+// QUOTATIONS
+// ============================================
+
+enum QuotationStatus {
+  draft
+  sent
+  accepted
+  rejected
+  expired
+}
+
+model Quotation {
+  id              String          @id @default(uuid()) @db.Uuid
+  quotationNumber String?         @unique @map("quotation_number") @db.VarChar(50)
+  cartId          String          @map("cart_id") @db.Uuid
+  createdById     String          @map("created_by") @db.Uuid
+  quotedTotal     Decimal?        @map("quoted_total") @db.Decimal(12, 2)
+  validUntil      DateTime?       @map("valid_until") @db.Date
+  terms           String?
+  status          QuotationStatus @default(draft)
+  sentAt          DateTime?       @map("sent_at")
+  expiresAt       DateTime?       @map("expires_at")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  // Relations
+  cart        IntendedCart    @relation(fields: [cartId], references: [id])
+  createdBy   User            @relation(fields: [createdById], references: [id])
+  items       QuotationItem[]
+  orders      Order[]
+  negotiation Negotiation?
+
+  @@map("quotations")
+}
+
+model QuotationItem {
+  id             String  @id @default(uuid()) @db.Uuid
+  quotationId    String  @map("quotation_id") @db.Uuid
+  cartItemId     String  @map("cart_item_id") @db.Uuid
+  finalUnitPrice Decimal @map("final_unit_price") @db.Decimal(10, 2)
+  quantity       Int
+  lineTotal      Decimal @map("line_total") @db.Decimal(12, 2)
+  notes          String?
+
+  // Relations
+  quotation  Quotation   @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  cartItem   CartItem    @relation(fields: [cartItemId], references: [id])
+  orderItems OrderItem[]
+
+  @@map("quotation_items")
+}
+
+// ============================================
+// ADMIN CONFIGURATION
+// ============================================
+
+model MarginConfiguration {
+  id               String   @id @default(uuid()) @db.Uuid
+  category         String?  @db.VarChar(50)
+  sourceType       String?  @map("source_type") @db.VarChar(20)
+  marginPercentage Decimal  @map("margin_percentage") @db.Decimal(5, 2)
+  minMarkup        Decimal? @map("min_markup") @db.Decimal(10, 2)
+  maxMarkup        Decimal? @map("max_markup") @db.Decimal(10, 2)
+  isActive         Boolean  @default(true) @map("is_active")
+  createdById      String?  @map("created_by") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  // Relations
+  createdBy User? @relation(fields: [createdById], references: [id])
+
+  @@map("margin_configurations")
+}
+
+// ============================================
+// ORDERS & FULFILLMENT
+// ============================================
+
+enum OrderStatus {
+  pending_payment
+  payment_failed
+  confirmed
+  in_procurement
+  partially_shipped
+  shipped
+  delivered
+  partially_delivered
+  cancelled
+  recheck
+}
+
+enum OrderItemSource {
+  inventory
+  manufacturer
+  alibaba
+}
+
+model Order {
+  id                 String      @id @default(uuid()) @db.Uuid
+  quotationId        String      @map("quotation_id") @db.Uuid
+  buyerId            String      @map("buyer_id") @db.Uuid
+  salesPersonId      String?     @map("sales_person_id") @db.Uuid
+  orderNumber        String      @unique @map("order_number") @db.VarChar(50)
+  status             OrderStatus @default(pending_payment)
+  totalAmount        Decimal     @map("total_amount") @db.Decimal(12, 2)
+  paidAmount         Decimal     @default(0) @map("paid_amount") @db.Decimal(12, 2)
+  deliveredAmount    Decimal     @default(0) @map("delivered_amount") @db.Decimal(12, 2)
+  notes              String?
+  balanceRequestedAt DateTime?   @map("balance_requested_at")
+  balanceDueAt       DateTime?   @map("balance_due_at")
+  paymentExpiresAt   DateTime?   @map("payment_expires_at")
+  createdAt          DateTime    @default(now()) @map("created_at")
+  updatedAt          DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  quotation   Quotation           @relation(fields: [quotationId], references: [id])
+  buyer       User                @relation("buyer_orders", fields: [buyerId], references: [id])
+  salesPerson User?               @relation("sales_orders", fields: [salesPersonId], references: [id])
+  items       OrderItem[]
+  payments    Payment[]
+  commissions Commission[]
+  shipments   Shipment[]
+  procurement ProcurementRecord[]
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id                   String          @id @default(uuid()) @db.Uuid
+  orderId              String          @map("order_id") @db.Uuid
+  quotationItemId      String          @map("quotation_item_id") @db.Uuid
+  source               OrderItemSource
+  productName          String          @map("product_name") @db.VarChar(255)
+  skuCode              String?         @map("sku_code") @db.VarChar(100)
+  quantity             Int
+  unitPrice            Decimal         @map("unit_price") @db.Decimal(10, 2)
+  lineTotal            Decimal         @map("line_total") @db.Decimal(12, 2)
+  deliveredQty         Int             @default(0) @map("delivered_qty")
+  status               String          @default("pending") @db.VarChar(30)
+  actualManufacturerId String?         @map("actual_manufacturer_id") @db.Uuid
+  manufacturerName     String?         @map("manufacturer_name") @db.VarChar(255)
+  procurementRecordId  String?         @map("procurement_record_id") @db.Uuid
+  createdAt            DateTime        @default(now()) @map("created_at")
+
+  // Relations
+  order              Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  quotationItem      QuotationItem      @relation(fields: [quotationItemId], references: [id])
+  actualManufacturer Manufacturer?      @relation(fields: [actualManufacturerId], references: [id])
+  procurementRecord  ProcurementRecord? @relation(fields: [procurementRecordId], references: [id])
+
+  @@map("order_items")
+}
+
+// ============================================
+// PAYMENTS
+// ============================================
+
+enum PaymentStatus {
+  pending
+  processing
+  paid
+  failed
+  expired
+  refunded
+}
+
+enum PaymentMethod {
+  card
+  bank_transfer
+  upi
+}
+
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  orderId           String        @map("order_id") @db.Uuid
+  amount            Decimal       @db.Decimal(12, 2)
+  method            PaymentMethod
+  status            PaymentStatus @default(pending)
+  gatewayRef        String?       @map("gateway_ref") @db.VarChar(255)
+  gatewayResponse   Json?         @map("gateway_response") @db.JsonB
+  paidAt            DateTime?     @map("paid_at")
+  expiresAt         DateTime?     @map("expires_at")
+  confirmedById     String?       @map("confirmed_by_id") @db.Uuid
+  proofDocumentUrl  String?       @map("proof_document_url") @db.VarChar(500)
+  verificationNotes String?       @map("verification_notes")
+  paymentType       String        @default("advance") @map("payment_type") @db.VarChar(20) // advance | balance
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  order       Order @relation(fields: [orderId], references: [id])
+  confirmedBy User? @relation(fields: [confirmedById], references: [id])
+
+  @@map("payments")
+}
+
+// ============================================
+// COMMISSIONS
+// ============================================
+
+model Commission {
+  id               String   @id @default(uuid()) @db.Uuid
+  orderId          String   @map("order_id") @db.Uuid
+  salesPersonId    String   @map("sales_person_id") @db.Uuid
+  commissionRate   Decimal  @map("commission_rate") @db.Decimal(5, 2)
+  deliveredValue   Decimal  @map("delivered_value") @db.Decimal(12, 2)
+  commissionAmount Decimal  @map("commission_amount") @db.Decimal(12, 2)
+  status           String   @default("pending") @db.VarChar(20)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  order       Order @relation(fields: [orderId], references: [id])
+  salesPerson User  @relation(fields: [salesPersonId], references: [id])
+
+  @@map("commissions")
+}
+
+// ============================================
+// SHIPPING & PROCUREMENT
+// ============================================
+
+model Shipment {
+  id             String    @id @default(uuid()) @db.Uuid
+  orderId        String    @map("order_id") @db.Uuid
+  trackingNumber String?   @map("tracking_number") @db.VarChar(100)
+  carrier        String?   @db.VarChar(100)
+  status         String    @default("preparing") @db.VarChar(30)
+  shippedAt      DateTime? @map("shipped_at")
+  deliveredAt    DateTime? @map("delivered_at")
+  notes          String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@map("shipments")
+}
+
+model ProcurementRecord {
+  id         String    @id @default(uuid()) @db.Uuid
+  orderId    String    @map("order_id") @db.Uuid
+  supplierId String?   @map("supplier_id") @db.Uuid
+  source     String    @db.VarChar(20)
+  status     String    @default("pending") @db.VarChar(30)
+  poNumber   String?   @map("po_number") @db.VarChar(50)
+  notes      String?
+  orderedAt  DateTime? @map("ordered_at")
+  expectedAt DateTime? @map("expected_at")
+  receivedAt DateTime? @map("received_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  order      Order       @relation(fields: [orderId], references: [id])
+  supplier   Supplier?   @relation(fields: [supplierId], references: [id])
+  orderItems OrderItem[]
+
+  @@map("procurement_records")
+}
+
+// ============================================
+// SUPPLIERS
+// ============================================
+
+model Supplier {
+  id           String    @id @default(uuid()) @db.Uuid
+  name         String    @db.VarChar(255)
+  type         String    @default("brand") @db.VarChar(30)
+  contactEmail String?   @map("contact_email") @db.VarChar(255)
+  contactPhone String?   @map("contact_phone") @db.VarChar(50)
+  website      String?   @db.VarChar(255)
+  apiEndpoint  String?   @map("api_endpoint") @db.VarChar(500)
+  apiStatus    String    @default("unknown") @map("api_status") @db.VarChar(20)
+  lastSyncAt   DateTime? @map("last_sync_at")
+  categories   String[]  @default([])
+  notes        String?
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  procurementRecords ProcurementRecord[]
+
+  @@map("suppliers")
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  type      String   @db.VarChar(50)
+  title     String   @db.VarChar(255)
+  message   String
+  link      String?  @db.VarChar(500)
+  isRead    Boolean  @default(false) @map("is_read")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
+// ============================================
+// SYSTEM CONFIGURATION
+// ============================================
+
+model SystemConfig {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String   @unique @db.VarChar(100)
+  value     Json     @db.JsonB
+  updatedBy String?  @map("updated_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_config")
+}
+
+// ============================================
+// NEGOTIATIONS
+// ============================================
+
+enum NegotiationStatus {
+  open
+  counter_buyer
+  counter_seller
+  accepted
+  rejected
+  closed
+}
+
+model Negotiation {
+  id          String            @id @default(uuid()) @db.Uuid
+  quotationId String            @unique @map("quotation_id") @db.Uuid
+  openedById  String            @map("opened_by") @db.Uuid
+  status      NegotiationStatus @default(open)
+  note        String?
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  // Relations
+  quotation Quotation          @relation(fields: [quotationId], references: [id])
+  openedBy  User               @relation("negotiations_opened", fields: [openedById], references: [id])
+  rounds    NegotiationRound[]
+
+  @@map("negotiations")
+}
+
+model NegotiationRound {
+  id            String   @id @default(uuid()) @db.Uuid
+  negotiationId String   @map("negotiation_id") @db.Uuid
+  proposedById  String   @map("proposed_by") @db.Uuid
+  roundNumber   Int      @map("round_number")
+  proposedTotal Decimal  @map("proposed_total") @db.Decimal(12, 2)
+  message       String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  // Relations
+  negotiation Negotiation            @relation(fields: [negotiationId], references: [id], onDelete: Cascade)
+  proposedBy  User                   @relation("negotiation_rounds_proposed", fields: [proposedById], references: [id])
+  items       NegotiationRoundItem[]
+
+  @@unique([negotiationId, roundNumber])
+  @@map("negotiation_rounds")
+}
+
+model NegotiationRoundItem {
+  id                 String  @id @default(uuid()) @db.Uuid
+  negotiationRoundId String  @map("negotiation_round_id") @db.Uuid
+  cartItemId         String  @map("cart_item_id") @db.Uuid
+  proposedUnitPrice  Decimal @map("proposed_unit_price") @db.Decimal(10, 2)
+  quantity           Int
+  lineTotal          Decimal @map("line_total") @db.Decimal(12, 2)
+  notes              String?
+
+  // Relations
+  negotiationRound NegotiationRound @relation(fields: [negotiationRoundId], references: [id], onDelete: Cascade)
+  cartItem         CartItem         @relation(fields: [cartItemId], references: [id])
+
+  @@map("negotiation_round_items")
+}
+
+// ============================================
+// MESSAGES (Buyer ↔ Sales Communication)
+// ============================================
+
+model Message {
+  id        String   @id @default(uuid()) @db.Uuid
+  cartId    String   @map("cart_id") @db.Uuid
+  senderId  String   @map("sender_id") @db.Uuid
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  cart   IntendedCart @relation(fields: [cartId], references: [id])
+  sender User         @relation(fields: [senderId], references: [id])
+
+  @@map("messages")
+}

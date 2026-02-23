@@ -1,0 +1,32 @@
+{
+    "name": "b2b-jewellery-platform",
+    "version": "1.0.0",
+    "private": true,
+    "workspaces": [
+        "apps/*",
+        "packages/*"
+    ],
+    "scripts": {
+        "dev": "turbo dev --filter=@jewellery/web --filter=@jewellery/api --filter=@jewellery/database --filter=@jewellery/shared",
+        "build": "turbo build",
+        "lint": "turbo lint",
+        "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+        "db:generate": "turbo db:generate",
+        "db:migrate": "turbo db:migrate",
+        "db:push": "turbo db:push",
+        "db:studio": "turbo db:studio",
+        "test": "turbo test",
+        "test:e2e": "turbo test:e2e",
+        "clean": "turbo clean && rm -rf node_modules"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.0",
+        "prettier": "^3.2.4",
+        "turbo": "^2.0.0",
+        "typescript": "^5.3.3"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "packageManager": "npm@10.2.4"
+}
