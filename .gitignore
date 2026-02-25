@@ -53,3 +53,13 @@ packages/database/prisma/*.db-journal
 
 # Secrets
 b2bjewellery-f39bf-firebase-adminsdk-fbsvc-11d7181832.json
+
+# Local test and debug scripts
+hash_passwords.js
+check_*.ts
+test_*.ts
+test-*.jpg
+
+# Debug and process logs
+*.log
+*.pid
