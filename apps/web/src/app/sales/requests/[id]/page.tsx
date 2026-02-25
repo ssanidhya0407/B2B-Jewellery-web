@@ -1,10 +1,22 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
-import QuotationTracker from '@/components/QuotationTracker';
+import { Building2, Calendar, ChevronRight, Clock, MapPin, Package, Phone, Search, ShoppingCart, Truck, X, MessageSquare, Send } from 'lucide-react';
+import QuotationTracker, { TrackerData } from '@/components/QuotationTracker';
+import CatalogBrowser from '@/components/sales/CatalogBrowser';
+import {
+    canUseNegotiationChat,
+    deriveCanonicalWorkflowStatus,
+    deriveOfferIterations,
+    deriveSalesModuleStatus,
+    deriveSalesPaymentState,
+    latestQuotationForThread,
+    type CanonicalWorkflowStatus,
+} from '@/lib/workflow';
+import { canonicalStatusBadgeClass, canonicalStatusDisplayLabel } from '@/lib/workflow-ui';
 
 /* ═══════ Types ═══════ */
 interface CartItem {
@@ -32,8 +44,11 @@ interface Quotation {
     status: string;
     quotedTotal: number;
     quotationNumber?: string;
+    terms?: string;
     validUntil: string;
     createdAt?: string;
+    sentAt?: string;
+    updatedAt?: string;
     items: Array<{ cartItemId: string; finalUnitPrice: number; quantity: number; lineTotal: number }>;
     createdBy?: { firstName?: string; lastName?: string; email: string };
 }
@@ -51,6 +66,35 @@ interface RequestDetail {
     quotations: Quotation[];
     assignedSales?: { id: string; firstName?: string; lastName?: string; email?: string } | null;
     validatedByOps?: { id: string; firstName?: string; lastName?: string } | null;
+    order?: {
+        id: string;
+        orderNumber?: string;
+        status?: string;
+        totalAmount?: number;
+        paidAmount?: number;
+        opsFinalCheckStatus?: string | null;
+        opsFinalCheckedAt?: string | null;
+        opsFinalCheckedById?: string | null;
+        opsFinalCheckReason?: string | null;
+        payments?: Array<{
+            id: string;
+            status?: string;
+            createdAt?: string;
+            method?: string;
+            amount?: number;
+            gatewayRef?: string;
+            paidAt?: string;
+        }>;
+        paymentLinkSentAt?: string | null;
+        paymentConfirmedAt?: string | null;
+        paymentConfirmationSource?: string | null;
+        forwardedToOpsAt?: string | null;
+    } | null;
+}
+
+interface ApplicableMarkupResponse {
+    marginPercentage?: number;
+    markupPercent?: number;
 }
 
 /* ═══════ Helpers ═══════ */
@@ -60,49 +104,253 @@ function getImg(item: CartItem) {
 function getName(item: CartItem) {
     return item.recommendationItem?.inventorySku?.name || item.recommendationItem?.manufacturerItem?.name || item.recommendationItem?.title || 'Product';
 }
-function getMetal(item: CartItem) {
-    return item.recommendationItem?.inventorySku?.primaryMetal || item.recommendationItem?.manufacturerItem?.primaryMetal || null;
-}
-function getSource(item: CartItem) {
-    return item.recommendationItem?.sourceType || item.availableSource || null;
-}
 function getEstimate(item: CartItem): number {
     const rec = item.recommendationItem;
-    if (rec?.displayPriceMin != null && rec?.displayPriceMax != null) return ((Number(rec.displayPriceMin) + Number(rec.displayPriceMax)) / 2) * item.quantity;
+    if (rec?.displayPriceMin != null || rec?.displayPriceMax != null) {
+        let sum = 0, count = 0;
+        if (rec.displayPriceMin != null) { sum += Number(rec.displayPriceMin); count++; }
+        if (rec.displayPriceMax != null) { sum += Number(rec.displayPriceMax); count++; }
+        if (count > 0) return (sum / count) * item.quantity;
+    }
     if (rec?.indicativePrice) return Number(rec.indicativePrice) * item.quantity;
     return 0;
 }
-function fmt(n: number) { return '\u20B9' + Math.round(n).toLocaleString('en-IN'); }
+function fmt(n: number) { return '₹' + Math.round(n).toLocaleString('en-IN'); }
+function fmtMoney(n: number) {
+    return '₹' + Number(n || 0).toLocaleString('en-IN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    });
+}
 function fmtDate(d: string, opts?: Intl.DateTimeFormatOptions) {
-    return new Date(d).toLocaleDateString('en-US', opts || { month: 'short', day: 'numeric', year: 'numeric' });
+    if (!d) return '—';
+    const parsed = new Date(d);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toLocaleDateString('en-US', opts || { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function initials(first?: string, last?: string, fallback = 'Q') {
+    const a = first?.[0]?.toUpperCase();
+    const b = last?.[0]?.toUpperCase();
+    return (a || b ? `${a ?? ''}${b ?? ''}` : fallback).trim() || fallback;
 }
 
-const statusConfig: Record<string, { label: string; bg: string; color: string; dot: string }> = {
-    submitted: { label: 'New Request', bg: 'rgba(245,158,11,0.08)', color: '#b45309', dot: '#f59e0b' },
-    under_review: { label: 'Under Review', bg: 'rgba(37,99,235,0.08)', color: '#1d4ed8', dot: '#3b82f6' },
-    quoted: { label: 'Quoted', bg: 'rgba(16,185,129,0.08)', color: '#047857', dot: '#10b981' },
-    closed: { label: 'Closed', bg: 'rgba(16,42,67,0.06)', color: '#486581', dot: '#94a3b8' },
-    accepted: { label: 'Accepted', bg: 'rgba(16,185,129,0.1)', color: '#047857', dot: '#10b981' },
-    sent: { label: 'Sent', bg: 'rgba(37,99,235,0.08)', color: '#1d4ed8', dot: '#3b82f6' },
-    draft: { label: 'Draft', bg: 'rgba(16,42,67,0.06)', color: '#486581', dot: '#94a3b8' },
-};
+function extractBuyerDeclineReason(quotation?: Quotation | null): string | null {
+    if (!quotation) return null;
+    const terms = String(quotation.terms || '').trim();
+    if (!terms) return null;
+    const match = terms.match(/buyer rejection:\s*(.*)$/i);
+    if (!match) return null;
+    const reason = match[1]?.trim();
+    return reason ? reason : null;
+}
 
-const invStatusConfig: Record<string, { label: string; color: string; bg: string; icon: string }> = {
-    in_stock: { label: 'In Stock', color: '#047857', bg: 'rgba(16,185,129,0.08)', icon: '\u2713' },
-    low_stock: { label: 'Low Stock', color: '#b45309', bg: 'rgba(245,158,11,0.08)', icon: '\u26A0' },
-    made_to_order: { label: 'Made to Order', color: '#7c3aed', bg: 'rgba(124,58,237,0.08)', icon: '\uD83D\uDD28' },
-    unavailable: { label: 'Unavailable', color: '#b91c1c', bg: 'rgba(239,68,68,0.06)', icon: '\u2715' },
-};
+function buildTrackerFromRequest(request: RequestDetail): TrackerData {
+    const latestQuotation = latestQuotationForThread(request.quotations);
+    const order = request.order || null;
+    const timeline: TrackerData['timeline'] = [];
 
-const sourceLabels: Record<string, string> = {
-    inventory: '\uD83D\uDCE6 Inventory',
-    manufacturer: '\uD83C\uDFED Manufacturer',
-};
+    if (request.submittedAt) {
+        timeline.push({
+            phase: 1,
+            label: 'Request Submitted',
+            status: 'completed',
+            timestamp: request.submittedAt,
+            actor: 'buyer',
+            actorName: [request.user.firstName, request.user.lastName].filter(Boolean).join(' ') || request.user.email,
+        });
+    }
 
-/* ═══════ Page ═══════ */
+    if (request.validatedAt) {
+        timeline.push({
+            phase: 2,
+            label: 'Inventory Validated',
+            status: 'completed',
+            timestamp: request.validatedAt,
+            actor: 'operations',
+        });
+    }
+
+    if (request.assignedAt) {
+        timeline.push({
+            phase: 2.5,
+            label: 'Assigned to Sales',
+            status: 'completed',
+            timestamp: request.assignedAt,
+            actor: 'operations',
+        });
+    }
+
+    if (latestQuotation?.createdAt) {
+        timeline.push({
+            phase: 3,
+            label: 'Quotation Created',
+            status: 'completed',
+            timestamp: latestQuotation.createdAt,
+            actor: 'sales',
+        });
+    }
+
+    if (latestQuotation?.sentAt) {
+        timeline.push({
+            phase: 4,
+            label: 'Quotation Sent',
+            status: 'completed',
+            timestamp: latestQuotation.sentAt,
+            actor: 'sales',
+            details: { quotedTotal: Number(latestQuotation.quotedTotal || 0) },
+        });
+    }
+
+    if (latestQuotation?.status === 'countered') {
+        timeline.push({
+            phase: 5,
+            label: 'Counter Offer Received',
+            status: 'active',
+            timestamp: latestQuotation.updatedAt || latestQuotation.createdAt || latestQuotation.sentAt,
+            actor: 'buyer',
+        });
+    }
+
+    if (latestQuotation?.status === 'negotiating') {
+        timeline.push({
+            phase: 5.5,
+            label: 'Final Offer Sent',
+            status: 'completed',
+            timestamp: latestQuotation.updatedAt || latestQuotation.sentAt || latestQuotation.createdAt,
+            actor: 'sales',
+        });
+    }
+
+    if (order?.paymentLinkSentAt) {
+        timeline.push({
+            phase: 6.4,
+            label: 'Payment Link Sent',
+            status: 'completed',
+            timestamp: order.paymentLinkSentAt,
+            actor: 'sales',
+        });
+    }
+
+    if (order?.paymentConfirmedAt) {
+        timeline.push({
+            phase: 6.6,
+            label: 'Payment Confirmed',
+            status: 'completed',
+            timestamp: order.paymentConfirmedAt,
+            actor: 'sales',
+            details: { source: order.paymentConfirmationSource || 'manual_reconciliation' },
+        });
+    }
+
+    if (order?.opsFinalCheckStatus === 'pending') {
+        timeline.push({
+            phase: 6.1,
+            label: 'Ops Final Check Pending',
+            status: 'active',
+            timestamp: latestQuotation?.updatedAt || latestQuotation?.createdAt || request.submittedAt,
+            actor: 'operations',
+        });
+    }
+
+    if (order?.opsFinalCheckStatus === 'approved' && order?.opsFinalCheckedAt) {
+        timeline.push({
+            phase: 6.2,
+            label: 'Ops Final Check Approved',
+            status: 'completed',
+            timestamp: order.opsFinalCheckedAt,
+            actor: 'operations',
+        });
+    }
+
+    if (order?.opsFinalCheckStatus === 'rejected' && order?.opsFinalCheckedAt) {
+        timeline.push({
+            phase: 6.2,
+            label: 'Ops Final Check Rejected',
+            status: 'rejected',
+            timestamp: order.opsFinalCheckedAt,
+            actor: 'operations',
+            details: { reason: order.opsFinalCheckReason || 'No reason provided' },
+        });
+    }
+
+    if (order?.forwardedToOpsAt) {
+        timeline.push({
+            phase: 6.7,
+            label: 'Forwarded to Ops for Fulfillment',
+            status: 'completed',
+            timestamp: order.forwardedToOpsAt,
+            actor: 'sales',
+        });
+    }
+
+    timeline.sort((a, b) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime());
+
+    return {
+        cart: {
+            id: request.id,
+            status: request.status,
+            buyer: {
+                id: request.user.id,
+                email: request.user.email,
+                companyName: request.user.companyName,
+                firstName: request.user.firstName,
+                lastName: request.user.lastName,
+            },
+            submittedAt: request.submittedAt,
+            assignedSales: request.assignedSales || null,
+            validatedByOps: request.validatedByOps || null,
+            validatedAt: request.validatedAt || undefined,
+            itemCount: request.items.length,
+        },
+        latestQuotation: latestQuotation
+            ? {
+                id: latestQuotation.id,
+                quotationNumber: latestQuotation.quotationNumber,
+                status: latestQuotation.status,
+                quotedTotal: latestQuotation.quotedTotal,
+                expiresAt: latestQuotation.validUntil,
+                sentAt: latestQuotation.sentAt,
+                items: latestQuotation.items || [],
+                negotiation: null,
+                order: order
+                    ? {
+                        id: order.id,
+                        orderNumber: order.orderNumber || `ORD-${order.id.slice(0, 6).toUpperCase()}`,
+                        status: order.status || 'pending_payment',
+                        totalAmount: order.totalAmount || 0,
+                        paidAmount: order.paidAmount || 0,
+                    }
+                    : null,
+            }
+            : null,
+        timeline,
+        messages: [],
+    };
+}
+
+function StatusBadge({ status, label }: { status: CanonicalWorkflowStatus; label?: string }) {
+    const cls = canonicalStatusBadgeClass(status);
+    const text = label || canonicalStatusDisplayLabel(status);
+    return (
+        <span className={`inline-flex px-2 py-0.5 rounded-md text-[11px] font-semibold capitalize ${cls}`}>
+            {text}
+        </span>
+    );
+}
+
+/* ═══════ Quick Quote Presets ═══════ */
+type PresetKey = '0' | '15' | '25';
+const QUICK_QUOTE_PRESETS: Array<{ key: PresetKey; label: string; percent: number }> = [
+    { key: '0', label: 'Base', percent: 0 },
+    { key: '15', label: 'Fast (15%)', percent: 15 },
+    { key: '25', label: 'Premium (25%)', percent: 25 },
+];
+
 export default function SalesRequestDetailPage() {
     const params = useParams();
     const router = useRouter();
+    const searchParams = useSearchParams();
+
     const cartId = params.id as string;
 
     const [request, setRequest] = useState<RequestDetail | null>(null);
@@ -114,17 +362,175 @@ export default function SalesRequestDetailPage() {
     const [quoting, setQuoting] = useState(false);
     const [quoteError, setQuoteError] = useState<string | null>(null);
 
-    const [trackerData, setTrackerData] = useState<Record<string, unknown> | null>(null);
-    const [showTracker, setShowTracker] = useState(false);
+    const [trackerData, setTrackerData] = useState<TrackerData | null>(null);
+    const [trackerLoading, setTrackerLoading] = useState(false);
 
     const [lightboxImg, setLightboxImg] = useState<string | null>(null);
 
-    const loadRequest = useCallback(async () => {
+    const [isCatalogOpen, setIsCatalogOpen] = useState(false);
+    const [replaceItemId, setReplaceItemId] = useState<string | null>(null);
+    const [extraItems, setExtraItems] = useState<CartItem[]>([]);
+
+    const [presetKey, setPresetKey] = useState<PresetKey>('15');
+    const presetPercent = useMemo(
+        () => QUICK_QUOTE_PRESETS.find((p) => p.key === presetKey)?.percent ?? 15,
+        [presetKey]
+    );
+
+    const [toast, setToast] = useState<string | null>(null);
+    const [showTracker, setShowTracker] = useState(false);
+
+    const [messages, setMessages] = useState<any[]>([]);
+    const [newMessage, setNewMessage] = useState('');
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const [isChatOpen, setIsChatOpen] = useState(false);
+    const [hasUnread, setHasUnread] = useState(false);
+    const [paymentActionLoading, setPaymentActionLoading] = useState(false);
+    const [paymentConfirmationSource, setPaymentConfirmationSource] = useState('bank_transfer');
+    const [marginPercentByItem, setMarginPercentByItem] = useState<Record<string, number>>({});
+    const [expandedVersionId, setExpandedVersionId] = useState<string | null>(null);
+
+    const loadMessages = useCallback(async () => {
         try {
-            const data = await api.getQuoteRequest(cartId) as RequestDetail;
-            setRequest(data);
+            const data = await api.getSalesMessages(cartId);
+            const msgs = data as any[];
+            setMessages(msgs);
+
+            // Check for unread
+            if (!isChatOpen && msgs.length > 0) {
+                const lastSeen = localStorage.getItem(`chat_last_seen_${cartId}`);
+                const lastMsgTime = new Date(msgs[msgs.length - 1].createdAt).getTime();
+                if (!lastSeen || lastMsgTime > parseInt(lastSeen)) {
+                    setHasUnread(true);
+                }
+            }
+        } catch (err) {
+            console.error('Failed to load messages:', err);
+        }
+    }, [cartId, isChatOpen]);
+
+    const activeQuotation = useMemo(() => latestQuotationForThread(request?.quotations), [request?.quotations]);
+    const canonicalStatus = deriveCanonicalWorkflowStatus({
+        cartStatus: request?.status,
+        latestQuotationStatus: activeQuotation?.status,
+        order: request?.order || null,
+        opsForwarded: Boolean(request?.assignedAt),
+    });
+    const salesCanonicalStatus = deriveSalesModuleStatus({
+        cartStatus: request?.status,
+        latestQuotationStatus: activeQuotation?.status,
+        order: request?.order || null,
+        opsForwarded: Boolean(request?.assignedAt),
+    });
+    const isNegotiating = canUseNegotiationChat(canonicalStatus);
+    const iterations = useMemo(() => deriveOfferIterations(request?.quotations), [request?.quotations]);
+    const quotationById = useMemo(
+        () => new Map((request?.quotations || []).map((q) => [q.id, q])),
+        [request?.quotations]
+    );
+    const cartItemById = useMemo(
+        () => new Map((request?.items || []).map((item) => [item.id, item])),
+        [request?.items]
+    );
+    const latestIterationId = iterations.length ? iterations[iterations.length - 1].id : null;
+    const paymentLinkSent = Boolean(request?.order?.paymentLinkSentAt);
+    const paymentConfirmed = Boolean(request?.order?.paymentConfirmedAt || request?.order?.payments?.some((p) => ['paid', 'completed'].includes((p.status || '').toLowerCase())));
+    const forwardedToOps = Boolean(request?.order?.forwardedToOpsAt || ['confirmed', 'in_procurement', 'partially_shipped', 'shipped', 'partially_delivered', 'delivered'].includes((request?.order?.status || '').toLowerCase()));
+    const opsFinalCheckStatus = (request?.order?.opsFinalCheckStatus || '').toLowerCase();
+    const opsFinalApproved = opsFinalCheckStatus === 'approved' || (!opsFinalCheckStatus && (paymentLinkSent || paymentConfirmed || forwardedToOps));
+    const opsFinalRejected = opsFinalCheckStatus === 'rejected';
+    const opsFinalPending = Boolean(request?.order?.id) && !opsFinalApproved && !opsFinalRejected;
+    const salesPaymentState = deriveSalesPaymentState(request?.order || null, paymentLinkSent);
+    const latestIterationStatus: CanonicalWorkflowStatus = salesCanonicalStatus === 'CLOSED_DECLINED'
+        ? 'CLOSED_DECLINED'
+        : salesCanonicalStatus === 'CLOSED_ACCEPTED'
+            ? 'PAID_CONFIRMED'
+            : opsFinalPending
+                ? 'ACCEPTED_PENDING_OPS_RECHECK'
+                : paymentConfirmed
+                    ? 'PAID_CONFIRMED'
+                    : paymentLinkSent
+                        ? 'PAYMENT_LINK_SENT'
+                        : canonicalStatus === 'ACCEPTED_PAYMENT_PENDING'
+                            ? 'ACCEPTED_PAYMENT_PENDING'
+                            : deriveCanonicalWorkflowStatus({ latestQuotationStatus: activeQuotation?.status });
+    const canManagePayment = Boolean(request?.order) && salesCanonicalStatus !== 'CLOSED_DECLINED';
+    const canSendOrResendPaymentLink = Boolean(request?.order?.id) && opsFinalApproved && !opsFinalRejected && !paymentConfirmed && !forwardedToOps;
+    const canConfirmPayment = !forwardedToOps && paymentLinkSent && !paymentConfirmed;
+    const canCreateOrderForPayment = !request?.order?.id
+        && salesCanonicalStatus !== 'CLOSED_DECLINED'
+        && Boolean(activeQuotation?.id)
+        && canonicalStatus === 'ACCEPTED_PAYMENT_PENDING';
+    const latestPaymentReference = useMemo(() => {
+        const payments = request?.order?.payments || [];
+        if (!payments.length) return null;
+        const byDate = [...payments].sort((a, b) => {
+            const at = new Date(a.paidAt || a.createdAt || 0).getTime();
+            const bt = new Date(b.paidAt || b.createdAt || 0).getTime();
+            return bt - at;
+        });
+        const preferred = byDate.find((p) => p.gatewayRef)?.gatewayRef;
+        return preferred || null;
+    }, [request?.order?.payments]);
+
+    useEffect(() => {
+        if (isNegotiating) {
+            loadMessages();
+            const interval = setInterval(loadMessages, 5000);
+            return () => clearInterval(interval);
+        } else {
+            setHasUnread(false);
+            setIsChatOpen(false);
+        }
+    }, [isNegotiating, loadMessages]);
+
+    useEffect(() => {
+        if (isChatOpen && messages.length > 0) {
+            setHasUnread(false);
+            localStorage.setItem(`chat_last_seen_${cartId}`, new Date(messages[messages.length - 1].createdAt).getTime().toString());
+        }
+    }, [isChatOpen, messages, cartId]);
+
+    useEffect(() => {
+        if (messagesEndRef.current && isChatOpen) {
+            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [messages, isChatOpen]);
+
+    const handleSendMessage = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!newMessage.trim() || !request) return;
+
+        const content = newMessage.trim();
+        setNewMessage('');
+
+        try {
+            await api.sendSalesMessage(request.id, content);
+            await loadMessages();
+        } catch (err) {
+            console.error('Failed to send message:', err);
+        }
+    };
+
+    useEffect(() => {
+        if (!toast) return;
+        const t = window.setTimeout(() => setToast(null), 2200);
+        return () => window.clearTimeout(t);
+    }, [toast]);
+
+    const loadRequest = useCallback(async () => {
+        setError(null);
+        try {
+            // Primary source for Sales module request details.
+            // Fallback to internal quotation request endpoint for compatibility.
+            const detailData = await api.getSalesRequestDetails(cartId).catch(() => api.getQuoteRequest(cartId));
+            setRequest(detailData as RequestDetail);
+            // Reset tracker so timeline toggle fetches freshest full API tracker.
+            setTrackerData(null);
+
+            // IMPORTANT: store the base indicative price (for applying presets reliably)
             const init: Record<string, string> = {};
-            data.items.forEach((item) => {
+            (detailData as RequestDetail).items.forEach((item) => {
                 init[item.id] = item.recommendationItem?.indicativePrice?.toString() || '';
             });
             setPrices(init);
@@ -137,72 +543,316 @@ export default function SalesRequestDetailPage() {
 
     useEffect(() => { loadRequest(); }, [loadRequest]);
 
-    const buyerName = useMemo(() => request ? [request.user.firstName, request.user.lastName].filter(Boolean).join(' ') || request.user.email : '', [request]);
-    const totalEstimate = useMemo(() => request?.items.reduce((s, i) => s + getEstimate(i), 0) || 0, [request]);
-    const quoteTotal = useMemo(() => request?.items.reduce((s, i) => s + (parseFloat(prices[i.id] || '0') * i.quantity), 0) || 0, [request, prices]);
-    const totalQuantity = useMemo(() => request?.items.reduce((s, i) => s + i.quantity, 0) || 0, [request]);
-    const latestQuote = request?.quotations[0] || null;
-    const statusCfg = statusConfig[request?.status || 'submitted'] || statusConfig.submitted;
-
-    const groupedItems = useMemo(() => {
-        if (!request) return {};
-        const groups: Record<string, CartItem[]> = {};
-        request.items.forEach((item) => {
-            const source = getSource(item) || 'other';
-            if (!groups[source]) groups[source] = [];
-            groups[source].push(item);
-        });
-        return groups;
+    const fetchTrackerData = useCallback(async () => {
+        if (!request) return;
+        try {
+            const tracker = await api.getQuotationTracker(request.id);
+            setTrackerData(tracker as TrackerData);
+        } catch {
+            // Fallback to local synthesized tracker when API tracker is unavailable.
+            setTrackerData(buildTrackerFromRequest(request));
+        }
     }, [request]);
 
-    const handleCreateQuote = async () => {
-        if (!request) return;
-        setQuoting(true); setQuoteError(null);
-        const items = request.items.map((item) => ({
-            cartItemId: item.id,
-            finalUnitPrice: parseFloat(prices[item.id] || '0'),
-        })).filter((i) => i.finalUnitPrice > 0);
-        if (items.length === 0) { setQuoteError('Please set prices for at least one item.'); setQuoting(false); return; }
-        try {
-            const quotation = await api.createQuotation({ cartId: request.id, items }) as Quotation;
-            await api.sendQuotation(quotation.id);
-            await loadRequest();
-            setShowQuoteForm(false);
-        } catch (err) { setQuoteError(err instanceof Error ? err.message : 'Failed to create quote'); }
-        finally { setQuoting(false); }
+    const handleToggleTimeline = useCallback(async () => {
+        if (showTracker) {
+            setShowTracker(false);
+            return;
+        }
+
+        setShowTracker(true);
+        if (trackerData) return;
+        setTrackerLoading(true);
+        await fetchTrackerData();
+        setTrackerLoading(false);
+    }, [showTracker, trackerData, fetchTrackerData]);
+
+    useEffect(() => {
+        const quote = searchParams.get('quote');
+        const preset = searchParams.get('preset') as PresetKey | null;
+
+        if (preset && QUICK_QUOTE_PRESETS.some((p) => p.key === preset)) setPresetKey(preset);
+        if (quote === '1') setShowQuoteForm(true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchParams]);
+
+    useEffect(() => {
+        if (request?.order?.paymentConfirmationSource) {
+            setPaymentConfirmationSource(request.order.paymentConfirmationSource);
+        }
+    }, [request?.order?.paymentConfirmationSource]);
+
+    const allItems = useMemo(() => {
+        if (!request) return [];
+        return [...request.items, ...extraItems];
+    }, [request, extraItems]);
+
+    const buyerName = useMemo(
+        () => (request ? [request.user.firstName, request.user.lastName].filter(Boolean).join(' ') || request.user.email : ''),
+        [request]
+    );
+
+    const totalEstimate = useMemo(() => allItems.reduce((s, i) => s + getEstimate(i), 0) || 0, [allItems]);
+    const marginOpportunity = useMemo(() => {
+        return allItems.reduce((sum, item) => {
+            const estimate = getEstimate(item);
+            const percent = marginPercentByItem[item.id];
+            const appliedPercent = Number.isFinite(percent) ? percent : 0;
+            return sum + (estimate * appliedPercent) / 100;
+        }, 0);
+    }, [allItems, marginPercentByItem]);
+    const quoteTotal = useMemo(
+        () => allItems.reduce((s, i) => s + (parseFloat(prices[i.id] || '0') * i.quantity), 0) || 0,
+        [allItems, prices]
+    );
+
+    const isClosed = salesCanonicalStatus === 'CLOSED_ACCEPTED' || salesCanonicalStatus === 'CLOSED_DECLINED';
+    const isBuyerDeclined = salesCanonicalStatus === 'CLOSED_DECLINED';
+    const buyerDeclineReason = useMemo(() => extractBuyerDeclineReason(activeQuotation), [activeQuotation]);
+    const isQuoted = canonicalStatus === 'QUOTED' || canonicalStatus === 'COUNTER' || canonicalStatus === 'FINAL' || ((request?.quotations?.length ?? 0) > 0);
+    const allowQuoting = !!request && !isClosed && Boolean(request?.assignedAt);
+    const isOpsValidated = Boolean(request?.validatedAt || request?.assignedAt);
+    const submittedDisplay = fmtDate(request?.submittedAt || '');
+
+    useEffect(() => {
+        const loadMarginRules = async () => {
+            if (!allItems.length) {
+                setMarginPercentByItem({});
+                return;
+            }
+
+            const keySet = new Set<string>();
+            const keyByItemId: Record<string, string> = {};
+            for (const item of allItems) {
+                const sourceType = item.recommendationItem?.sourceType
+                    || (item.recommendationItem?.manufacturerItem ? 'manufacturer' : 'inventory');
+                const category = item.recommendationItem?.manufacturerItem?.category
+                    || request?.session?.selectedCategory
+                    || 'default';
+                const key = `${category}::${sourceType}`;
+                keySet.add(key);
+                keyByItemId[item.id] = key;
+            }
+
+            const entries = Array.from(keySet);
+            const results = await Promise.all(
+                entries.map(async (key) => {
+                    const [category, sourceType] = key.split('::');
+                    try {
+                        const markup = await api.getApplicableMarkup(category, sourceType) as ApplicableMarkupResponse;
+                        const percent = Number(markup.marginPercentage ?? markup.markupPercent ?? 35);
+                        return [key, Number.isFinite(percent) ? percent : 35] as const;
+                    } catch {
+                        return [key, 35] as const;
+                    }
+                })
+            );
+
+            const byKey = new Map(results);
+            const byItem: Record<string, number> = {};
+            Object.entries(keyByItemId).forEach(([itemId, key]) => {
+                byItem[itemId] = byKey.get(key) ?? 35;
+            });
+            setMarginPercentByItem(byItem);
+        };
+        loadMarginRules();
+    }, [allItems, request?.session?.selectedCategory]);
+
+    const handleSelectItem = (item: any) => {
+        const newItem: CartItem = {
+            id: `new-${item.id}-${Date.now()}`,
+            quantity: 1,
+            recommendationItem: {
+                id: item.id,
+                title: item.name,
+                sourceType: 'inventory',
+                indicativePrice: item.indicativePrice || item.baseCost,
+                inventorySku: {
+                    name: item.name,
+                    imageUrl: item.imageUrl,
+                    skuCode: item.skuCode,
+                    primaryMetal: item.primaryMetal,
+                }
+            }
+        };
+
+        setExtraItems((prev) => [...prev, newItem]);
+        if (replaceItemId) setReplaceItemId(null);
+        setPrices((prev) => ({ ...prev, [newItem.id]: (item.indicativePrice || item.baseCost || 0).toString() }));
+        setIsCatalogOpen(false);
     };
 
-    const loadTracker = async () => {
-        try {
-            const data = await api.getQuotationTracker(cartId) as Record<string, unknown>;
-            setTrackerData(data);
-            setShowTracker(true);
-        } catch (err) { alert(err instanceof Error ? err.message : 'Failed to load tracker'); }
+    /**
+     * FIX: Apply wasn't changing values because many items have `indicativePrice` missing (null/undefined),
+     * so our preset logic was skipping them. We now fall back to a derived indicative value:
+     * - use recommendationItem.indicativePrice if present
+     * - else use midpoint of displayPriceMin/displayPriceMax
+     *
+     * This ensures Apply always sets something when the UI shows items.
+     */
+    const getIndicativeUnitPrice = useCallback((item: CartItem): number | null => {
+        const rec = item.recommendationItem;
+        if (!rec) return null;
+
+        if (rec.indicativePrice != null && !Number.isNaN(Number(rec.indicativePrice))) return Number(rec.indicativePrice);
+
+        if (rec.displayPriceMin != null || rec.displayPriceMax != null) {
+            let sum = 0, count = 0;
+            if (rec.displayPriceMin != null) { sum += Number(rec.displayPriceMin); count++; }
+            if (rec.displayPriceMax != null) { sum += Number(rec.displayPriceMax); count++; }
+            if (count > 0) return sum / count;
+        }
+
+        return null;
+    }, []);
+
+    const applyMarkup = useCallback((percent: number) => {
+        setPrices((prev) => {
+            const next: Record<string, string> = { ...prev };
+
+            allItems.forEach((item) => {
+                const base = getIndicativeUnitPrice(item);
+                if (base == null) return;
+                next[item.id] = (base * (1 + percent / 100)).toFixed(2);
+            });
+
+            return next;
+        });
+    }, [allItems, getIndicativeUnitPrice]);
+
+    const handlePresetApply = () => {
+        // If nothing to apply to, show a specific message
+        const applicable = allItems.some((i) => getIndicativeUnitPrice(i) != null);
+        if (!applicable) {
+            setToast('No indicative price found to apply preset');
+            return;
+        }
+
+        applyMarkup(presetPercent);
+        setToast(`Applied ${presetPercent}% preset`);
     };
+
+    const handleSaveQuote = async () => {
+        if (!request) return;
+        setQuoting(true); setQuoteError(null);
+
+        const combined = allItems
+            .map((item) => ({ cartItemId: item.id, finalUnitPrice: parseFloat(prices[item.id] || '0') }))
+            .filter((i) => i.finalUnitPrice > 0);
+
+        if (combined.length === 0) {
+            setQuoteError('Please set prices for at least one item.');
+            setQuoting(false);
+            return;
+        }
+
+        try {
+            if (activeQuotation?.status === 'draft') {
+                await api.updateQuotation(activeQuotation.id, { items: combined });
+                await api.sendQuotation(activeQuotation.id);
+            } else {
+                const quotation = (await api.createQuotation({ cartId: request.id, items: combined })) as Quotation;
+                await api.sendQuotation(quotation.id);
+            }
+            await loadRequest();
+            setExtraItems([]);
+            setShowQuoteForm(false);
+            setToast('Quote saved successfully');
+        } catch (err) {
+            setQuoteError(err instanceof Error ? err.message : 'Failed to create quote');
+        } finally {
+            setQuoting(false);
+        }
+    };
+
+    const handleSendPaymentLink = async () => {
+        if (!request?.order?.id) return;
+        setPaymentActionLoading(true);
+        try {
+            if (paymentLinkSent) {
+                await api.resendSalesPaymentLink(request.order.id, 'order');
+            } else {
+                await api.createSalesPaymentLink(request.order.id, 'order');
+            }
+            setToast(paymentLinkSent ? 'Payment link resent' : 'Payment link sent');
+            await loadRequest();
+        } catch (err) {
+            setToast(err instanceof Error ? err.message : 'Failed to send payment link');
+        } finally {
+            setPaymentActionLoading(false);
+        }
+    };
+
+    const handleConfirmPayment = async () => {
+        if (!request?.order?.id) return;
+        setPaymentActionLoading(true);
+        try {
+            await api.confirmSalesPayment(request.order.id, { source: paymentConfirmationSource }, 'order');
+            setToast('Payment confirmed');
+            await loadRequest();
+        } catch (err) {
+            setToast(err instanceof Error ? err.message : 'Failed to confirm payment');
+        } finally {
+            setPaymentActionLoading(false);
+        }
+    };
+
+    const handleForwardToOps = async () => {
+        if (!request) return;
+        setPaymentActionLoading(true);
+        try {
+            if (request.order?.id) {
+                await api.forwardPaidOrderToOps(request.order.id);
+            } else {
+                await api.updateRequestStatus(request.id, 'under_review');
+            }
+            setToast('Forwarded to Ops for fulfillment');
+            await loadRequest();
+        } catch (err) {
+            setToast(err instanceof Error ? err.message : 'Failed to forward to Ops');
+        } finally {
+            setPaymentActionLoading(false);
+        }
+    };
+
+    const handleCreateOrderForPayment = async () => {
+        if (!activeQuotation?.id) return;
+        setPaymentActionLoading(true);
+        try {
+            await api.convertToOrder(activeQuotation.id);
+            setToast('Order created. You can now send payment link.');
+            await loadRequest();
+        } catch (err) {
+            setToast(err instanceof Error ? err.message : 'Failed to create order');
+        } finally {
+            setPaymentActionLoading(false);
+        }
+    };
+
+    // loadTracker removed as data is now loaded in loadRequest
+
+    // Auto-apply ONCE for quick quote flows
+    const [autoAppliedFromQuery, setAutoAppliedFromQuery] = useState(false);
+    useEffect(() => {
+        if (!showQuoteForm) return;
+        if (autoAppliedFromQuery) return;
+
+        const fromQuickQuote = searchParams.get('quote') === '1';
+        if (!fromQuickQuote) return;
+
+        handlePresetApply();
+        setAutoAppliedFromQuery(true);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [showQuoteForm, autoAppliedFromQuery]);
 
     if (loading) {
         return (
-            <main className="py-8 px-4 sm:px-6 lg:px-8 max-w-[1280px] mx-auto">
-                <div className="h-4 w-32 rounded skeleton mb-8" />
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                    <div className="lg:col-span-8 space-y-5">
-                        <div className="bg-white rounded-2xl border border-primary-100/60 p-6 space-y-4">
-                            <div className="h-6 w-56 rounded skeleton" />
-                            <div className="h-3 w-80 rounded skeleton" />
-                            <div className="grid grid-cols-4 gap-3 mt-4">
-                                {[1, 2, 3, 4].map(i => <div key={i} className="h-16 rounded-xl skeleton" />)}
-                            </div>
-                        </div>
-                        {[1, 2, 3].map(i => (
-                            <div key={i} className="bg-white rounded-2xl border border-primary-100/60 p-5 flex gap-4">
-                                <div className="w-16 h-16 rounded-xl skeleton shrink-0" />
-                                <div className="flex-1 space-y-2"><div className="h-4 w-40 rounded skeleton" /><div className="h-3 w-64 rounded skeleton" /></div>
-                            </div>
-                        ))}
-                    </div>
-                    <div className="lg:col-span-4 space-y-5">
-                        <div className="bg-white rounded-2xl border border-primary-100/60 p-6 h-48 skeleton" />
-                        <div className="bg-white rounded-2xl border border-primary-100/60 p-6 h-32 skeleton" />
+            <main className="min-h-screen py-10 px-6 lg:px-10 font-sans tracking-tight">
+                <div className="max-w-[1300px] mx-auto space-y-8 animate-pulse">
+                    <div className="h-5 w-52 bg-gray-200 rounded-lg" />
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                        <div className="lg:col-span-8 h-[520px] bg-white rounded-[2.5rem] border border-gray-50/50" />
+                        <div className="lg:col-span-4 h-[520px] bg-white rounded-[2.5rem] border border-gray-50/50" />
                     </div>
                 </div>
             </main>
@@ -211,244 +861,271 @@ export default function SalesRequestDetailPage() {
 
     if (error || !request) {
         return (
-            <main className="py-8 px-4 sm:px-6 lg:px-8 max-w-[1280px] mx-auto">
-                <div className="bg-white rounded-2xl border border-primary-100/60 p-16 text-center">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-red-50 flex items-center justify-center">
-                        <svg className="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" /></svg>
-                    </div>
-                    <p className="text-sm text-red-600 font-semibold">{error || 'Request not found'}</p>
-                    <button onClick={() => router.back()} className="text-sm text-primary-500 mt-4 hover:text-primary-700 transition-colors">{'\u2190'} Go back to requests</button>
+            <main className="min-h-screen flex items-center justify-center p-6">
+                <div className="max-w-md w-full bg-white rounded-[2.5rem] border border-gray-50/50 p-10 text-center shadow-[0_8px_30px_rgb(0,0,0,0.02)]">
+                    <h2 className="text-xl font-bold text-gray-900">Request Not Found</h2>
+                    <p className="text-gray-400 mt-2 text-sm">{error || 'The request could not be loaded.'}</p>
+                    <button onClick={() => router.back()} className="mt-6 px-6 py-3 bg-[#0F172A] text-white rounded-[1.25rem] text-[12px] font-bold uppercase tracking-widest hover:bg-black transition-colors">
+                        Go Back
+                    </button>
                 </div>
             </main>
         );
     }
 
     return (
-        <main className="py-8 px-4 sm:px-6 lg:px-8 max-w-[1280px] mx-auto">
+        <main className="min-h-screen py-10 px-6 lg:px-10 font-sans tracking-tight">
+            {toast && (
+                <div className="fixed bottom-6 right-6 z-50 bg-[#0F172A] text-white px-5 py-3 rounded-[1.25rem] shadow-[0_20px_40px_rgba(0,0,0,0.25)] text-[12px] font-bold uppercase tracking-widest">
+                    {toast}
+                </div>
+            )}
+
             {/* Lightbox */}
             {lightboxImg && (
-                <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setLightboxImg(null)}>
-                    <div className="relative max-w-3xl max-h-[85vh]">
-                        <img src={lightboxImg} alt="" className="max-w-full max-h-[85vh] object-contain rounded-2xl shadow-2xl" />
-                        <button onClick={() => setLightboxImg(null)} className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-white shadow-lg flex items-center justify-center text-primary-500 hover:text-primary-900 transition-colors">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
+                <div className="fixed inset-0 bg-gray-900/90 z-50 flex items-center justify-center p-6 backdrop-blur-sm" onClick={() => setLightboxImg(null)}>
+                    <div className="relative max-w-5xl max-h-[90vh] bg-white rounded-[2rem] overflow-hidden shadow-2xl">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={lightboxImg} alt="" className="max-w-full max-h-[85vh] object-contain p-2" />
                     </div>
                 </div>
             )}
 
-            {/* Breadcrumb */}
-            <nav className="flex items-center gap-2 text-sm text-primary-400 mb-6">
-                <Link href="/sales/requests" className="hover:text-primary-600 transition-colors flex items-center gap-1.5">
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
-                    Requests
-                </Link>
-                <span className="text-primary-200">/</span>
-                <span className="text-primary-700 font-medium truncate max-w-[200px]">{buyerName}</span>
-            </nav>
+            <div className="max-w-[1300px] mx-auto space-y-6">
+                <header className="rounded-[2rem] border border-gray-100/80 bg-white px-6 py-5 shadow-[0_8px_26px_rgb(15,23,42,0.03)]">
+                    <div className="flex flex-col md:flex-row md:items-end justify-between gap-5">
+                        <div>
+                            <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-gray-400">Sales workflow</p>
+                            <nav className="flex items-center gap-2 text-[12px] font-medium text-gray-400 mb-1 mt-1">
+                                <Link href="/sales/requests" className="hover:text-gray-900 transition-colors">Requests</Link>
+                                <span className="text-gray-300">/</span>
+                                <span className="text-gray-900 font-semibold px-2 py-0.5 rounded-md bg-white ring-1 ring-gray-200">{request.id.slice(0, 8)}</span>
+                            </nav>
 
-            {/* HEADER CARD */}
-            <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden mb-6">
-                <div className="h-1" style={{ background: 'linear-gradient(90deg, #b8860b 0%, #d4a537 50%, #b8860b 100%)' }} />
-                <div className="p-6">
-                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
-                        <div className="flex items-start gap-4">
-                            <div className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 text-lg font-bold text-white shadow-sm"
-                                style={{ background: 'linear-gradient(135deg, #b8860b 0%, #d4a537 100%)' }}>
-                                {(request.user.firstName?.[0] || request.user.email[0]).toUpperCase()}
-                            </div>
-                            <div>
-                                <div className="flex items-center gap-3 mb-1">
-                                    <h1 className="font-display text-xl font-bold text-primary-900">{buyerName}</h1>
-                                    <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full flex items-center gap-1.5"
-                                        style={{ background: statusCfg.bg, color: statusCfg.color }}>
-                                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: statusCfg.dot }} />
-                                        {statusCfg.label}
-                                    </span>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-primary-500">
-                                    <span className="flex items-center gap-1">
-                                        <svg className="w-3.5 h-3.5 text-primary-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" /></svg>
-                                        {request.user.email}
-                                    </span>
-                                    {request.user.companyName && (<><span className="w-px h-3 bg-primary-200" /><span>{request.user.companyName}</span></>)}
-                                    {request.user.phone && (<><span className="w-px h-3 bg-primary-200" /><span>{request.user.phone}</span></>)}
-                                </div>
-                            </div>
+                            <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Quote Request</h1>
+                            <p className="text-[13px] text-gray-500 font-medium mt-1">
+                                Buyer context, line items, and quoting workflow
+                            </p>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                            <button onClick={loadTracker} className="text-xs font-semibold px-3.5 py-2 rounded-xl border border-primary-200 text-primary-600 hover:bg-primary-50 transition-all flex items-center gap-1.5">
-                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" /></svg>
-                                Tracker
+
+                        <div className="flex items-center gap-2.5">
+                            <button
+                                onClick={handleToggleTimeline}
+                                disabled={trackerLoading}
+                                className={`h-10 px-5 rounded-[1rem] text-[11px] font-bold uppercase tracking-widest transition-all ring-1
+                            ${showTracker
+                                        ? 'bg-amber-50 text-amber-600 ring-amber-100 hover:bg-amber-100'
+                                        : 'bg-white text-gray-900 ring-gray-200 hover:ring-gray-300'
+                                    } disabled:opacity-60 disabled:cursor-not-allowed`}
+                            >
+                                {trackerLoading ? 'Loading…' : showTracker ? 'Close' : 'Timeline'}
                             </button>
-                            {!latestQuote && request.status !== 'closed' && (
-                                <button onClick={() => setShowQuoteForm(!showQuoteForm)}
-                                    className="text-xs font-semibold px-4 py-2 rounded-xl text-white shadow-sm hover:shadow-md transition-all flex items-center gap-1.5"
-                                    style={{ background: showQuoteForm ? '#b91c1c' : 'linear-gradient(135deg, #b8860b 0%, #d4a537 100%)' }}>
-                                    {showQuoteForm ? '\u2715 Cancel' : '+ Create Quote'}
+
+                            {allowQuoting ? (
+                                <button
+                                    onClick={() => setShowQuoteForm((v) => !v)}
+                                    className={`h-10 px-5 rounded-[1rem] text-[11px] font-bold uppercase tracking-widest transition-all ring-1
+                                ${showQuoteForm
+                                            ? 'bg-red-50 text-red-600 ring-red-100 hover:bg-red-100'
+                                            : 'bg-[#0F172A] text-white ring-[#0F172A] hover:bg-black'
+                                        }`}
+                                >
+                                    {showQuoteForm ? 'Cancel' : isQuoted ? 'Revise Quote' : 'Prepare Quote'}
                                 </button>
+                            ) : (
+                                <div className="h-10 px-5 rounded-[1rem] bg-gray-100 ring-1 ring-gray-200 flex items-center text-[11px] font-bold uppercase tracking-widest text-gray-600">
+                                    {isClosed ? 'Closed' : 'Awaiting Ops Forward'}
+                                </div>
                             )}
                         </div>
                     </div>
+                </header>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-6 pt-5 border-t border-primary-100/40">
-                        {[
-                            { label: 'Items', value: String(request.items.length), sub: totalQuantity + ' units total' },
-                            { label: 'Est. Value', value: totalEstimate > 0 ? fmt(totalEstimate) : '\u2014', sub: 'Based on catalog' },
-                            { label: 'Ops Status', value: request.validatedAt ? '\u2713 Validated' : '\u23F3 Pending', sub: request.validatedAt ? fmtDate(request.validatedAt, { month: 'short', day: 'numeric' }) : 'Awaiting ops' },
-                            { label: 'Quotes Sent', value: String(request.quotations.length), sub: latestQuote ? latestQuote.status : 'None yet' },
-                            { label: 'Submitted', value: fmtDate(request.submittedAt, { month: 'short', day: 'numeric' }), sub: fmtDate(request.submittedAt, { hour: '2-digit', minute: '2-digit' }) },
-                        ].map(s => (
-                            <div key={s.label} className="p-3 rounded-xl border border-primary-50" style={{ background: 'rgba(16,42,67,0.015)' }}>
-                                <p className="text-[9px] uppercase tracking-widest text-primary-400 font-semibold mb-1">{s.label}</p>
-                                <p className="text-sm font-bold text-primary-900">{s.value}</p>
-                                <p className="text-[10px] text-primary-400 mt-0.5">{s.sub}</p>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            </div>
+                <CatalogBrowser
+                    isOpen={isCatalogOpen}
+                    onClose={() => { setIsCatalogOpen(false); setReplaceItemId(null); }}
+                    onSelect={handleSelectItem}
+                    title={replaceItemId ? "Select Replacement Item" : "Add to Selection"}
+                />
 
-            {/* TRACKER */}
-            {showTracker && trackerData && (
-                <div className="mb-6 bg-white rounded-2xl border border-primary-100/60 p-5 overflow-hidden">
-                    <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-sm font-semibold text-primary-700">Quotation Timeline</h3>
-                        <button onClick={() => setShowTracker(false)} className="text-xs text-primary-400 hover:text-primary-600 transition-colors px-2 py-1 rounded-lg hover:bg-primary-50">Hide</button>
-                    </div>
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    <QuotationTracker data={trackerData as any} role="sales" />
-                </div>
-            )}
-
-            {/* MAIN GRID */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                {/* LEFT COLUMN */}
-                <div className="lg:col-span-8 space-y-6">
-
-                    {showQuoteForm && (
-                        <div className="rounded-2xl border-2 border-dashed p-4" style={{ borderColor: '#d4a537', background: 'rgba(184,134,11,0.03)' }}>
-                            <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #b8860b 0%, #d4a537 100%)' }}>
-                                    <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+                {/* Layout Container */}
+                <div className="relative">
+                    {/* Sticky Timeline */}
+                    {showTracker && trackerData && (
+                        <div className="sticky top-4 z-30 mb-8 animate-in fade-in slide-in-from-top-4 duration-500">
+                            <div className="max-h-[420px] overflow-y-auto rounded-[2.5rem] shadow-[0_20px_50px_rgba(0,0,0,0.1)] border border-gray-100 bg-white">
+                                <div className="p-1 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-md z-10 px-8 py-4 border-b border-gray-50/50">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-1.5 h-6 bg-[#0F172A] rounded-full" />
+                                        <h2 className="text-lg font-bold text-gray-900 tracking-tight">Activity Timeline</h2>
+                                    </div>
+                                    <button
+                                        onClick={() => setShowTracker(false)}
+                                        className="text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-gray-900 transition-colors"
+                                    >
+                                        Close
+                                    </button>
                                 </div>
-                                <div>
-                                    <p className="text-sm font-semibold text-primary-900">Quote Mode Active</p>
-                                    <p className="text-xs text-primary-500">Set your final unit prices for each item below, then submit.</p>
+                                <div className="p-2">
+                                    <QuotationTracker data={trackerData} role="sales" />
                                 </div>
                             </div>
                         </div>
                     )}
 
-                    {/* Items Section */}
-                    <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
-                        <div className="px-6 py-4 border-b border-primary-100/40 flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'rgba(184,134,11,0.08)' }}>
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5} style={{ color: '#b8860b' }}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" /></svg>
+                    <div className="flex flex-col lg:flex-row gap-6 items-stretch pb-20">
+                        {/* LEFT: Main Content Area */}
+                        <div className="flex-1 min-w-0 flex flex-col gap-8">
+                            {/* Buyer info card */}
+                            <div className="bg-white rounded-[2.2rem] border border-gray-100 shadow-[0_8px_30px_rgb(15,23,42,0.03)] p-8">
+                                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                                    <div className="flex items-center gap-4 min-w-0">
+                                        <div className="w-12 h-12 rounded-full bg-gray-50 ring-1 ring-gray-100 flex items-center justify-center shrink-0 overflow-hidden">
+                                            <span className="text-[12px] font-bold text-gray-400 uppercase tracking-wider">
+                                                {initials(request.user.firstName, request.user.lastName, (request.user.email?.[0] || 'Q').toUpperCase())}
+                                            </span>
+                                        </div>
+
+                                        <div className="min-w-0">
+                                            <p className="text-[16px] font-bold text-gray-900 truncate">{request.user.companyName || buyerName}</p>
+                                            <p className="text-[12px] text-gray-400 font-medium truncate mt-1">
+                                                {request.user.companyName ? `${buyerName} • ` : ''}{request.user.email}{request.user.phone ? ` • ${request.user.phone}` : ''}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-6 md:justify-end">
+                                        <div className="text-right">
+                                            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Submitted</p>
+                                            <p className="text-[13px] font-bold text-gray-900">{submittedDisplay}</p>
+                                        </div>
+                                        <div className="text-right">
+                                            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Status</p>
+                                            <StatusBadge status={salesCanonicalStatus} label={canonicalStatusDisplayLabel(salesCanonicalStatus)} />
+                                        </div>
+                                    </div>
                                 </div>
-                                <div>
-                                    <h2 className="font-display text-sm font-semibold text-primary-900">Requested Items</h2>
-                                    <p className="text-[11px] text-primary-400">{request.items.length} item{request.items.length !== 1 ? 's' : ''} {'\u00B7'} {totalQuantity} units</p>
+                                <div className="mt-4 pt-4 border-t border-gray-50/70 flex flex-wrap gap-2.5 text-[11px]">
+                                    <span className={`px-2.5 py-1 rounded-lg font-semibold ring-1 ${isOpsValidated ? 'bg-emerald-50 text-emerald-700 ring-emerald-200' : 'bg-gray-50 text-gray-500 ring-gray-200'}`}>
+                                        {isOpsValidated ? 'Ops Validated' : 'Awaiting Ops Validation'}
+                                    </span>
+                                    <span className={`px-2.5 py-1 rounded-lg font-semibold ring-1 ${request.assignedAt ? 'bg-sky-50 text-sky-700 ring-sky-200' : 'bg-gray-50 text-gray-500 ring-gray-200'}`}>
+                                        {request.assignedAt ? 'Forwarded by Ops' : 'Awaiting Ops Forward'}
+                                    </span>
+                                    {forwardedToOps && (
+                                        <span className="px-2.5 py-1 rounded-lg font-semibold ring-1 bg-teal-50 text-teal-700 ring-teal-200">
+                                            Sent to Ops for Processing
+                                        </span>
+                                    )}
+                                    {opsFinalPending && (
+                                        <span className="px-2.5 py-1 rounded-lg font-semibold ring-1 bg-cyan-50 text-cyan-700 ring-cyan-200">
+                                            Awaiting Ops Final Check
+                                        </span>
+                                    )}
+                                    {opsFinalRejected && (
+                                        <span className="px-2.5 py-1 rounded-lg font-semibold ring-1 bg-gray-50 text-gray-600 ring-gray-200">
+                                            Ops Final Check Rejected
+                                        </span>
+                                    )}
                                 </div>
                             </div>
-                            {request.session?.maxUnitPrice && (
-                                <span className="text-[10px] font-semibold px-2.5 py-1 rounded-lg bg-amber-50 text-amber-700">
-                                    Budget: {fmt(request.session.maxUnitPrice)}/unit
-                                </span>
-                            )}
-                        </div>
 
-                        {Object.entries(groupedItems).map(([source, items]) => (
-                            <div key={source}>
-                                {Object.keys(groupedItems).length > 1 && (
-                                    <div className="px-6 py-2.5 border-b border-primary-50/80" style={{ background: 'rgba(16,42,67,0.02)' }}>
-                                        <span className="text-[10px] font-semibold text-primary-500 uppercase tracking-wider">
-                                            {sourceLabels[source] || source} ({items.length})
-                                        </span>
+                            {/* Items list card */}
+                            <div className="bg-white rounded-[2.2rem] border border-gray-100 shadow-[0_8px_30px_rgb(15,23,42,0.03)] overflow-hidden">
+                                <div className="px-8 py-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-gray-50/50">
+                                    <div>
+                                        <h2 className="text-lg font-bold text-gray-900">Requested Items</h2>
+                                        <div className="mt-2 flex items-center gap-2">
+                                            <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded bg-gray-50 text-gray-500 ring-1 ring-gray-200">{allItems.length} items</span>
+                                            <span className="text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded bg-gray-50 text-gray-500 ring-1 ring-gray-200">{allItems.reduce((s, i) => s + i.quantity, 0)} total qty</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {showQuoteForm && (
+                                    <div className="px-8 py-6 border-b border-gray-50/50">
+                                        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                                            <div>
+                                                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-2">
+                                                    Quick Quote Presets
+                                                </p>
+                                                <div className="flex flex-wrap gap-2">
+                                                    {QUICK_QUOTE_PRESETS.map((p) => (
+                                                        <button
+                                                            key={p.key}
+                                                            onClick={() => setPresetKey(p.key)}
+                                                            className={`px-5 py-3 rounded-full text-[11px] font-bold uppercase tracking-widest transition-all ring-1
+                                                            ${presetKey === p.key
+                                                                    ? 'bg-indigo-50 text-indigo-600 ring-indigo-200'
+                                                                    : 'bg-white text-gray-500 ring-gray-200 hover:ring-gray-300'
+                                                                }`}
+                                                        >
+                                                            {p.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+
+                                            <button
+                                                onClick={handlePresetApply}
+                                                className="h-11 px-6 rounded-[1.25rem] bg-[#0F172A] text-white ring-1 ring-[#0F172A] hover:bg-black transition-colors text-[11px] font-bold uppercase tracking-widest"
+                                            >
+                                                Apply
+                                            </button>
+                                        </div>
                                     </div>
                                 )}
-                                <div className="divide-y divide-primary-50/80">
-                                    {items.map((item, idx) => {
+
+                                <div className="divide-y divide-gray-50/80">
+                                    {allItems.map((item, idx) => {
                                         const imgUrl = getImg(item);
                                         const name = getName(item);
-                                        const metal = getMetal(item);
-                                        const invS = item.inventoryStatus ? invStatusConfig[item.inventoryStatus] : null;
                                         const estimate = getEstimate(item);
-                                        const rec = item.recommendationItem;
-                                        const mfg = rec?.manufacturerItem;
 
                                         return (
-                                            <div key={item.id} className="px-5 py-4 hover:bg-primary-50/30 transition-colors">
-                                                <div className="flex gap-4">
-                                                    <div className="w-20 h-20 rounded-xl bg-primary-50 shrink-0 overflow-hidden border border-primary-100/40 relative cursor-pointer group"
-                                                        onClick={() => imgUrl && setLightboxImg(imgUrl)}>
+                                            <div key={item.id} className="px-8 py-5 hover:bg-gray-50/30 transition-colors">
+                                                <div className="flex flex-col sm:flex-row gap-5">
+                                                    <button
+                                                        type="button"
+                                                        className="w-16 h-16 rounded-[1.25rem] bg-gray-50 ring-1 ring-gray-100 overflow-hidden shrink-0 text-left"
+                                                        onClick={() => imgUrl && setLightboxImg(imgUrl)}
+                                                        aria-label="Open image"
+                                                    >
                                                         {imgUrl ? (
-                                                            <>
-                                                                <img src={imgUrl} alt={name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" />
-                                                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
-                                                                    <svg className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 transition-opacity drop-shadow" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607zM10.5 7.5v6m3-3h-6" /></svg>
-                                                                </div>
-                                                            </>
+                                                            // eslint-disable-next-line @next/next/no-img-element
+                                                            <img src={imgUrl} className="w-full h-full object-cover" alt="" />
                                                         ) : (
-                                                            <div className="w-full h-full flex items-center justify-center">
-                                                                <span className="text-2xl font-bold text-primary-200">{idx + 1}</span>
-                                                            </div>
+                                                            <div className="w-full h-full flex items-center justify-center text-gray-300 font-bold text-lg">{idx + 1}</div>
                                                         )}
-                                                        <span className="absolute top-1 left-1 w-5 h-5 rounded-md bg-white/90 backdrop-blur text-[9px] font-bold text-primary-600 flex items-center justify-center shadow-sm">{idx + 1}</span>
-                                                    </div>
+                                                    </button>
 
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="flex items-start justify-between gap-3">
-                                                            <div className="min-w-0">
-                                                                <h3 className="text-sm font-semibold text-primary-900 truncate">{name}</h3>
-                                                                <div className="flex flex-wrap items-center gap-2 mt-1.5">
-                                                                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-primary-50 text-primary-600">Qty: {item.quantity}</span>
-                                                                    {metal && <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-amber-50 text-amber-700">{metal}</span>}
-                                                                    {getSource(item) && <span className="text-[10px] font-medium px-2 py-0.5 rounded-md text-primary-500" style={{ background: 'rgba(16,42,67,0.04)' }}>{sourceLabels[getSource(item)!] || getSource(item)}</span>}
-                                                                    {rec?.inventorySku?.skuCode && <span className="text-[10px] font-mono text-primary-400">SKU: {rec.inventorySku.skuCode}</span>}
-                                                                </div>
-                                                                <div className="flex flex-wrap items-center gap-2 mt-2">
-                                                                    {invS && <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md flex items-center gap-1" style={{ background: invS.bg, color: invS.color }}>{invS.icon} {invS.label}</span>}
-                                                                    {item.validatedQuantity != null && <span className="text-[10px] text-primary-500">Validated: {item.validatedQuantity} of {item.quantity}</span>}
-                                                                    {mfg?.moq && <span className="text-[10px] text-primary-400">MOQ: {mfg.moq}</span>}
-                                                                    {mfg?.leadTimeDays && <span className="text-[10px] text-primary-400">Lead: {mfg.leadTimeDays}d</span>}
-                                                                </div>
+                                                    <div className="flex-1 min-w-0 flex flex-col sm:flex-row justify-between gap-4">
+                                                        <div className="min-w-0 flex-1">
+                                                            <p className="text-[15px] font-bold text-gray-900 truncate">{name}</p>
+                                                            <div className="flex flex-wrap items-center gap-2 mt-2">
+                                                                <span className="text-[11px] font-bold uppercase tracking-widest text-gray-400">Qty</span>
+                                                                <span className="text-[12px] font-bold text-gray-900">{item.quantity}</span>
                                                             </div>
-
-                                                            {showQuoteForm ? (
-                                                                <div className="shrink-0 text-right">
-                                                                    <label className="text-[9px] uppercase tracking-wider text-primary-400 font-semibold block mb-1">Unit Price</label>
-                                                                    <div className="relative">
-                                                                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-primary-300">{'\u20B9'}</span>
-                                                                        <input type="number" step="0.01" min="0"
-                                                                            value={prices[item.id] || ''}
-                                                                            onChange={(e) => setPrices(p => ({ ...p, [item.id]: e.target.value }))}
-                                                                            className="w-28 pl-6 pr-2 py-2 text-sm text-right font-semibold rounded-xl border border-primary-200/60 bg-white outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-100 transition-all"
-                                                                            placeholder="0.00" />
-                                                                    </div>
-                                                                    {prices[item.id] && parseFloat(prices[item.id]) > 0 && (
-                                                                        <p className="text-[10px] text-primary-400 mt-1">Line: {fmt(parseFloat(prices[item.id]) * item.quantity)}</p>
-                                                                    )}
-                                                                </div>
-                                                            ) : estimate > 0 ? (
-                                                                <div className="shrink-0 text-right">
-                                                                    <p className="text-sm font-bold text-primary-900">~{fmt(estimate)}</p>
-                                                                    <p className="text-[10px] text-primary-400 mt-0.5">est. total</p>
-                                                                </div>
-                                                            ) : null}
                                                         </div>
 
-                                                        {item.operationsNotes && (
-                                                            <div className="mt-2.5 px-3 py-2 rounded-lg bg-blue-50/80 border border-blue-100/60 flex items-start gap-2">
-                                                                <span className="text-[10px] shrink-0 mt-0.5">{'\uD83D\uDD27'}</span>
-                                                                <p className="text-[11px] text-blue-700 leading-relaxed"><span className="font-semibold">Ops note:</span> {item.operationsNotes}</p>
+                                                        {showQuoteForm ? (
+                                                            <div className="sm:text-right shrink-0 w-full sm:w-[220px]">
+                                                                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-2">Unit Price</p>
+                                                                <div className="flex items-center gap-2 justify-end">
+                                                                    <span className="text-[12px] font-bold text-indigo-500">₹</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        step="1"
+                                                                        value={prices[item.id] || ''}
+                                                                        onChange={(e) => setPrices((p) => ({ ...p, [item.id]: e.target.value }))}
+                                                                        className="w-full text-right px-4 py-3 rounded-[1.25rem] bg-gray-50/60 ring-1 ring-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-200 text-[13px] font-bold text-gray-900"
+                                                                    />
+                                                                </div>
                                                             </div>
-                                                        )}
-                                                        {item.itemNotes && (
-                                                            <div className="mt-2 px-3 py-2 rounded-lg bg-amber-50/80 border border-amber-100/60 flex items-start gap-2">
-                                                                <span className="text-[10px] shrink-0 mt-0.5">{'\uD83D\uDCAC'}</span>
-                                                                <p className="text-[11px] text-amber-700 leading-relaxed"><span className="font-semibold">Buyer note:</span> {item.itemNotes}</p>
+                                                        ) : (
+                                                            <div className="sm:text-right shrink-0 min-w-[120px]">
+                                                                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1.5">Est. Value</p>
+                                                                <p className="text-[15px] font-bold text-gray-900 tabular-nums">{fmt(estimate)}</p>
                                                             </div>
                                                         )}
                                                     </div>
@@ -457,248 +1134,407 @@ export default function SalesRequestDetailPage() {
                                         );
                                     })}
                                 </div>
-                            </div>
-                        ))}
 
-                        {/* Quote Submit Bar */}
-                        {showQuoteForm && (
-                            <div className="px-6 py-5 border-t border-primary-100/40" style={{ background: 'linear-gradient(180deg, rgba(184,134,11,0.03) 0%, rgba(184,134,11,0.06) 100%)' }}>
-                                {quoteError && (
-                                    <div className="mb-4 p-3 rounded-xl text-xs text-red-700 bg-red-50 border border-red-100/60 flex items-center gap-2">
-                                        <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
-                                        {quoteError}
+                                {showQuoteForm && (
+                                    <div className="px-8 py-6 border-t border-gray-50/50 bg-gray-50/40">
+                                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                                            <div className="text-left">
+                                                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Quote Total</p>
+                                                <p className="text-2xl font-bold text-gray-900 leading-none">{fmt(quoteTotal)}</p>
+                                            </div>
+                                            <div className="flex justify-end pt-4">
+                                                <button
+                                                    onClick={handleSaveQuote}
+                                                    disabled={quoting || !Object.keys(prices).length}
+                                                    className="w-full sm:w-auto h-12 px-8 rounded-full bg-[#0F172A] text-white font-bold text-[12px] uppercase tracking-widest hover:bg-black transition-transform active:scale-95 disabled:opacity-50 flex items-center justify-center shadow-lg shadow-indigo-900/20"
+                                                >
+                                                    {quoting ? 'Saving...' : (activeQuotation?.status === 'countered' ? 'Set Final Price' : (isQuoted ? 'Update Quote' : 'Send Quote'))}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {quoteError && <p className="text-red-500 text-[12px] font-medium mt-3">{quoteError}</p>}
                                     </div>
                                 )}
-                                <div className="flex items-center justify-between mb-4">
-                                    <div>
-                                        <p className="text-xs text-primary-500">Review your prices and send the quote to the buyer.</p>
-                                        <p className="text-[10px] text-primary-400 mt-0.5">{request.items.filter(i => parseFloat(prices[i.id] || '0') > 0).length} of {request.items.length} items priced</p>
-                                    </div>
-                                    <div className="text-right">
-                                        <p className="text-[9px] uppercase tracking-wider text-primary-400 font-semibold">Quote Total</p>
-                                        <p className="text-xl font-bold text-primary-900">{fmt(quoteTotal)}</p>
-                                    </div>
-                                </div>
-                                <button onClick={handleCreateQuote} disabled={quoting || quoteTotal <= 0}
-                                    className="w-full py-3 rounded-xl text-sm font-semibold text-white transition-all disabled:opacity-40 hover:shadow-lg hover:-translate-y-0.5 active:translate-y-0 flex items-center justify-center gap-2"
-                                    style={{ background: 'linear-gradient(135deg, #b8860b 0%, #d4a537 100%)' }}>
-                                    {quoting ? 'Creating & Sending\u2026' : 'Create & Send Quote to Buyer'}
-                                </button>
                             </div>
-                        )}
-                    </div>
 
-                    {/* Sent Quotations */}
-                    {request.quotations.length > 0 && (
-                        <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
-                            <div className="px-6 py-4 border-b border-primary-100/40 flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-emerald-50">
-                                    <svg className="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25z" /></svg>
+                            {canCreateOrderForPayment && (
+                                <div className="bg-white rounded-[2.2rem] border border-gray-100 shadow-[0_8px_30px_rgb(15,23,42,0.03)] overflow-hidden">
+                                    <div className="px-8 py-6 border-b border-gray-50/50 flex items-center justify-between">
+                                        <h2 className="text-lg font-bold text-gray-900">Payment Management</h2>
+                                        <StatusBadge status="ACCEPTED_PAYMENT_PENDING" label={canonicalStatusDisplayLabel('ACCEPTED_PAYMENT_PENDING')} />
+                                    </div>
+                                    <div className="px-8 py-6 space-y-4">
+                                        <p className="text-[12px] text-gray-500">
+                                            Buyer has accepted, but no order record is linked yet. Create order first to start payment link workflow.
+                                        </p>
+                                        <button
+                                            onClick={handleCreateOrderForPayment}
+                                            disabled={paymentActionLoading}
+                                            className="w-full h-11 rounded-[1.25rem] bg-[#0F172A] text-white font-bold text-[10px] uppercase tracking-widest disabled:opacity-50"
+                                        >
+                                            Create Order & Start Payment
+                                        </button>
+                                    </div>
                                 </div>
-                                <div>
-                                    <h2 className="font-display text-sm font-semibold text-primary-900">Sent Quotations</h2>
-                                    <p className="text-[11px] text-primary-400">{request.quotations.length} quote{request.quotations.length !== 1 ? 's' : ''} sent</p>
+                            )}
+
+                            {isBuyerDeclined && (
+                                <div className="bg-white rounded-[2.2rem] border border-red-100 shadow-[0_8px_30px_rgb(15,23,42,0.03)] overflow-hidden">
+                                    <div className="px-8 py-6 border-b border-red-50/70 flex items-center justify-between">
+                                        <h2 className="text-lg font-bold text-gray-900">Buyer Declined</h2>
+                                        <StatusBadge status="CLOSED_DECLINED" label={canonicalStatusDisplayLabel('CLOSED_DECLINED')} />
+                                    </div>
+                                    <div className="px-8 py-6">
+                                        <p className="text-[11px] font-bold uppercase tracking-widest text-gray-400">Rejection Reason</p>
+                                        <p className="mt-2 text-[14px] font-medium text-gray-700">
+                                            {buyerDeclineReason || 'No rejection reason was provided by the buyer.'}
+                                        </p>
+                                    </div>
                                 </div>
-                            </div>
-                            <div className="p-5 space-y-3">
-                                {request.quotations.map(q => {
-                                    const qStatus = statusConfig[q.status] || { label: q.status, bg: 'rgba(16,42,67,0.04)', color: '#486581', dot: '#94a3b8' };
-                                    return (
-                                        <div key={q.id} className="p-4 rounded-xl border border-primary-100/40 hover:shadow-sm transition-all" style={{ background: 'rgba(16,42,67,0.01)' }}>
-                                            <div className="flex items-center justify-between mb-3">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1.5" style={{ background: qStatus.bg, color: qStatus.color }}>
-                                                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: qStatus.dot }} />
-                                                        {qStatus.label}
-                                                    </span>
-                                                    {q.createdBy && <span className="text-[10px] text-primary-400">by {[q.createdBy.firstName, q.createdBy.lastName].filter(Boolean).join(' ') || q.createdBy.email}</span>}
-                                                </div>
-                                                <p className="text-[11px] text-primary-400">Valid until {fmtDate(q.validUntil, { month: 'short', day: 'numeric' })}</p>
+                            )}
+
+                            {canManagePayment && (
+                                <div className="bg-white rounded-[2.2rem] border border-gray-100 shadow-[0_8px_30px_rgb(15,23,42,0.03)] overflow-hidden">
+                                    <div className="px-8 py-6 border-b border-gray-50/50 flex items-center justify-between">
+                                        <h2 className="text-lg font-bold text-gray-900">Payment Management</h2>
+                                        <StatusBadge
+                                            status={forwardedToOps
+                                                ? 'READY_FOR_OPS'
+                                                : opsFinalPending
+                                                    ? 'ACCEPTED_PENDING_OPS_RECHECK'
+                                                    : paymentConfirmed
+                                                        ? 'PAID_CONFIRMED'
+                                                        : salesPaymentState.linkStatus === 'SENT'
+                                                            ? 'PAYMENT_LINK_SENT'
+                                                            : 'ACCEPTED_PAYMENT_PENDING'}
+                                            label={forwardedToOps
+                                                ? canonicalStatusDisplayLabel('READY_FOR_OPS')
+                                                : opsFinalPending
+                                                    ? canonicalStatusDisplayLabel('ACCEPTED_PENDING_OPS_RECHECK')
+                                                    : paymentConfirmed
+                                                        ? canonicalStatusDisplayLabel('PAID_CONFIRMED')
+                                                        : salesPaymentState.linkStatus === 'SENT'
+                                                            ? canonicalStatusDisplayLabel('PAYMENT_LINK_SENT')
+                                                            : canonicalStatusDisplayLabel('ACCEPTED_PAYMENT_PENDING')}
+                                        />
+                                    </div>
+                                    <div className="px-8 py-6 space-y-5">
+                                        <div className="rounded-2xl border border-gray-100 bg-gray-50/60 p-4">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <p className="text-[11px] font-bold uppercase tracking-widest text-gray-500">Payment Progress</p>
+                                                <span className="text-[10px] font-semibold text-gray-500">
+                                                    {forwardedToOps ? 'Complete' : opsFinalPending ? 'Awaiting Ops final check' : paymentConfirmed ? 'Awaiting Ops intake' : paymentLinkSent ? 'Awaiting payment' : 'Awaiting link'}
+                                                </span>
                                             </div>
-                                            <div className="flex items-baseline justify-between">
-                                                <p className="text-lg font-bold text-primary-900">{q.quotationNumber || '#' + q.id.slice(0, 8)}</p>
-                                                <p className="text-lg font-bold" style={{ color: '#b8860b' }}>{fmt(Number(q.quotedTotal))}</p>
+                                            <div className="mt-3 grid grid-cols-4 gap-2">
+                                                <span className={`text-[10px] font-bold uppercase tracking-widest text-center py-2 rounded-lg ring-1 ${opsFinalPending ? 'bg-cyan-50 text-cyan-700 ring-cyan-200' : salesPaymentState.linkStatus === 'SENT' || paymentLinkSent ? 'bg-indigo-50 text-indigo-700 ring-indigo-200' : 'bg-white text-gray-400 ring-gray-200'}`}>{opsFinalPending ? 'Ops Check' : 'Link'}</span>
+                                                <span className={`text-[10px] font-bold uppercase tracking-widest text-center py-2 rounded-lg ring-1 ${paymentConfirmed ? 'bg-emerald-50 text-emerald-700 ring-emerald-200' : 'bg-white text-gray-400 ring-gray-200'}`}>Paid</span>
+                                                <span className={`text-[10px] font-bold uppercase tracking-widest text-center py-2 rounded-lg ring-1 ${forwardedToOps ? 'bg-teal-50 text-teal-700 ring-teal-200' : 'bg-white text-gray-400 ring-gray-200'}`}>Ops</span>
+                                                <span className={`text-[10px] font-bold uppercase tracking-widest text-center py-2 rounded-lg ring-1 ${forwardedToOps ? 'bg-blue-50 text-blue-700 ring-blue-200' : 'bg-white text-gray-400 ring-gray-200'}`}>Processing</span>
                                             </div>
-                                            {q.items && q.items.length > 0 && (
-                                                <div className="mt-3 pt-3 border-t border-primary-50/80">
-                                                    <div className="grid grid-cols-3 gap-2 text-[10px] font-semibold text-primary-400 uppercase tracking-wider mb-1.5 px-1">
-                                                        <span>Item</span><span className="text-center">Qty</span><span className="text-right">Price</span>
-                                                    </div>
-                                                    {q.items.map((qi, i) => {
-                                                        const cartItem = request.items.find(ci => ci.id === qi.cartItemId);
-                                                        return (
-                                                            <div key={i} className="grid grid-cols-3 gap-2 text-xs py-1 px-1">
-                                                                <span className="text-primary-700 truncate">{cartItem ? getName(cartItem) : 'Item ' + (i + 1)}</span>
-                                                                <span className="text-center text-primary-500">{qi.quantity}</span>
-                                                                <span className="text-right font-semibold text-primary-900">{fmt(Number(qi.lineTotal))}</span>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            )}
                                         </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    )}
-                </div>
 
-                {/* RIGHT COLUMN */}
-                <div className="lg:col-span-4 space-y-5">
-                    {/* Buyer Details */}
-                    <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
-                        <div className="px-5 py-3.5 border-b border-primary-100/40 flex items-center gap-2">
-                            <svg className="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /></svg>
-                            <h3 className="text-xs font-semibold text-primary-700">Buyer Details</h3>
-                        </div>
-                        <div className="p-5 space-y-3">
-                            <div className="flex items-center gap-3"><span className="text-sm w-6 text-center shrink-0">{'\uD83D\uDC64'}</span><div className="min-w-0"><p className="text-[10px] text-primary-400 font-medium">Name</p><p className="text-sm font-medium text-primary-900 truncate">{buyerName}</p></div></div>
-                            <div className="flex items-center gap-3"><span className="text-sm w-6 text-center shrink-0">{'\uD83C\uDFE2'}</span><div className="min-w-0"><p className="text-[10px] text-primary-400 font-medium">Company</p><p className="text-sm font-medium text-primary-900 truncate">{request.user.companyName || '\u2014'}</p></div></div>
-                            <div className="flex items-center gap-3"><span className="text-sm w-6 text-center shrink-0">{'\u2709\uFE0F'}</span><div className="min-w-0"><p className="text-[10px] text-primary-400 font-medium">Email</p><p className="text-sm font-medium text-primary-900 truncate">{request.user.email}</p></div></div>
-                            {request.user.phone && <div className="flex items-center gap-3"><span className="text-sm w-6 text-center shrink-0">{'\uD83D\uDCDE'}</span><div className="min-w-0"><p className="text-[10px] text-primary-400 font-medium">Phone</p><p className="text-sm font-medium text-primary-900 truncate">{request.user.phone}</p></div></div>}
-                        </div>
-                    </div>
-
-                    {/* AI Attributes */}
-                    {request.session?.geminiAttributes && Object.keys(request.session.geminiAttributes).length > 0 && (
-                        <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
-                            <div className="px-5 py-3.5 border-b border-primary-100/40 flex items-center gap-2">
-                                <svg className="w-4 h-4 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" /></svg>
-                                <h3 className="text-xs font-semibold text-primary-700">AI Detected Attributes</h3>
-                            </div>
-                            <div className="p-5">
-                                <div className="flex flex-wrap gap-1.5">
-                                    {Object.entries(request.session.geminiAttributes).map(([key, val]) => (
-                                        <span key={key} className="text-[10px] px-2.5 py-1 rounded-lg bg-purple-50 text-purple-700 font-medium">
-                                            {String(key).replace(/_/g, ' ')}: {String(val)}
-                                        </span>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Ops Validation */}
-                    {request.validatedByOps && (
-                        <div className="bg-white rounded-2xl border border-emerald-200/60 overflow-hidden">
-                            <div className="px-5 py-3.5 border-b border-emerald-100/40 flex items-center gap-2" style={{ background: 'rgba(16,185,129,0.03)' }}>
-                                <svg className="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                                <h3 className="text-xs font-semibold text-emerald-700">Ops Validated</h3>
-                            </div>
-                            <div className="p-5 space-y-2">
-                                <div className="flex items-center gap-2">
-                                    <div className="w-7 h-7 rounded-lg bg-emerald-50 flex items-center justify-center text-[10px] font-bold text-emerald-600">
-                                        {(request.validatedByOps.firstName?.[0] || '?').toUpperCase()}
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-primary-900">{[request.validatedByOps.firstName, request.validatedByOps.lastName].filter(Boolean).join(' ') || 'Operations'}</p>
-                                        {request.validatedAt && <p className="text-[10px] text-primary-400">{fmtDate(request.validatedAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>}
-                                    </div>
-                                </div>
-                                <div className="mt-3 pt-3 border-t border-emerald-100/40 space-y-1.5">
-                                    {request.items.map((item, i) => {
-                                        const invS = item.inventoryStatus ? invStatusConfig[item.inventoryStatus] : null;
-                                        return (
-                                            <div key={item.id} className="flex items-center justify-between text-[11px]">
-                                                <span className="text-primary-600 truncate mr-2">{i + 1}. {getName(item)}</span>
-                                                {invS ? (
-                                                    <span className="font-semibold shrink-0 px-1.5 py-0.5 rounded" style={{ color: invS.color, background: invS.bg }}>{invS.icon} {invS.label}</span>
-                                                ) : (
-                                                    <span className="text-primary-400 shrink-0">{'\u2014'}</span>
-                                                )}
+                                        <p className="text-[12px] text-gray-500">
+                                            Sales owns payment lifecycle. Payment link is blocked until Ops final check is approved.
+                                        </p>
+                                        {opsFinalPending && (
+                                            <div className="rounded-xl border border-cyan-100 bg-cyan-50 px-4 py-3 text-[12px] text-cyan-700">
+                                                Ops final check is pending. Sales cannot send payment link yet.
                                             </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Assigned Sales */}
-                    {request.assignedSales && (
-                        <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
-                            <div className="px-5 py-3.5 border-b border-primary-100/40 flex items-center gap-2">
-                                <svg className="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197M15 6.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" /></svg>
-                                <h3 className="text-xs font-semibold text-primary-700">Assigned Sales</h3>
-                            </div>
-                            <div className="p-5">
-                                <div className="flex items-center gap-3">
-                                    <div className="w-9 h-9 rounded-xl flex items-center justify-center text-sm font-bold text-white" style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #6366f1 100%)' }}>
-                                        {(request.assignedSales.firstName?.[0] || request.assignedSales.email?.[0] || '?').toUpperCase()}
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-medium text-primary-900">{[request.assignedSales.firstName, request.assignedSales.lastName].filter(Boolean).join(' ') || request.assignedSales.email}</p>
-                                        <p className="text-[10px] text-primary-400">{request.assignedSales.email}</p>
-                                    </div>
-                                </div>
-                                {request.assignedAt && <p className="text-[10px] text-primary-400 mt-2">Assigned {fmtDate(request.assignedAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Reference Image */}
-                    {request.session?.thumbnailUrl && (
-                        <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
-                            <div className="px-5 py-3.5 border-b border-primary-100/40 flex items-center gap-2">
-                                <svg className="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M2.25 18V7.5a2.25 2.25 0 012.25-2.25h15a2.25 2.25 0 012.25 2.25v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25z" /></svg>
-                                <h3 className="text-xs font-semibold text-primary-700">Reference Image</h3>
-                            </div>
-                            <div className="p-4">
-                                <div className="w-full rounded-xl overflow-hidden bg-primary-50 border border-primary-100/40 cursor-pointer group" onClick={() => setLightboxImg(request.session!.thumbnailUrl!)}>
-                                    <img src={request.session.thumbnailUrl} alt="Reference" className="w-full h-auto object-cover group-hover:scale-105 transition-transform duration-300" />
-                                </div>
-                                {request.session.selectedCategory && <p className="text-[10px] text-primary-500 mt-2 text-center">Category: <span className="font-medium">{request.session.selectedCategory}</span></p>}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Cost Breakdown */}
-                    <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
-                        <div className="px-5 py-3.5 border-b border-primary-100/40 flex items-center gap-2">
-                            <svg className="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z" /></svg>
-                            <h3 className="text-xs font-semibold text-primary-700">Cost Breakdown</h3>
-                        </div>
-                        <div className="p-5 space-y-2.5">
-                            {request.items.map((item, idx) => {
-                                const name = getName(item);
-                                const estimate = getEstimate(item);
-                                return (
-                                    <div key={item.id} className="flex items-center justify-between group">
-                                        <div className="flex items-center gap-2 min-w-0 mr-2">
-                                            <span className="w-5 h-5 rounded-md bg-primary-50 text-[9px] font-bold text-primary-400 flex items-center justify-center shrink-0">{idx + 1}</span>
-                                            <span className="text-xs text-primary-700 truncate">{name}</span>
-                                            <span className="text-[10px] text-primary-400 shrink-0">{'\u00D7'}{item.quantity}</span>
-                                        </div>
-                                        {estimate > 0 ? (
-                                            <span className="text-xs font-semibold text-primary-900 shrink-0">{fmt(estimate)}</span>
-                                        ) : (
-                                            <span className="text-xs text-primary-300 shrink-0">{'\u2014'}</span>
                                         )}
+                                        {opsFinalRejected && (
+                                            <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-[12px] text-gray-700">
+                                                Ops rejected this order before payment. Reason: {request?.order?.opsFinalCheckReason || 'No reason provided'}.
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <button
+                                                onClick={handleSendPaymentLink}
+                                                disabled={paymentActionLoading || !canSendOrResendPaymentLink}
+                                                className="h-11 rounded-[1rem] bg-indigo-600 text-white font-bold text-[10px] uppercase tracking-widest disabled:opacity-50"
+                                            >
+                                                {paymentLinkSent ? 'Resend Payment Link' : 'Send Payment Link'}
+                                            </button>
+                                            <div className={`h-11 rounded-[1rem] text-[10px] font-bold uppercase tracking-widest flex items-center justify-center ring-1 ${forwardedToOps ? 'bg-teal-600 text-white ring-teal-600' : 'bg-white text-gray-500 ring-gray-200'}`}>
+                                                {forwardedToOps ? 'Auto Forwarded to Ops' : 'Will Auto-forward on Paid'}
+                                            </div>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
+                                            <div>
+                                                <label className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Confirmation Source</label>
+                                                <select
+                                                    value={paymentConfirmationSource}
+                                                    onChange={(e) => setPaymentConfirmationSource(e.target.value)}
+                                                    className="mt-1 w-full h-11 px-3 rounded-[1rem] border border-gray-200 bg-white text-sm"
+                                                    disabled={paymentActionLoading || !canConfirmPayment}
+                                                >
+                                                    <option value="bank_transfer">Bank Transfer Receipt</option>
+                                                    <option value="payment_gateway">Payment Gateway</option>
+                                                    <option value="upi">UPI</option>
+                                                    <option value="manual_reconciliation">Manual Reconciliation</option>
+                                                </select>
+                                            </div>
+                                            <button
+                                                onClick={handleConfirmPayment}
+                                                disabled={paymentActionLoading || !canConfirmPayment}
+                                                className="h-11 px-6 rounded-[1rem] bg-emerald-600 text-white font-bold text-[10px] uppercase tracking-widest disabled:opacity-50"
+                                            >
+                                                Confirm Paid
+                                            </button>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
+                                            <div className="rounded-xl border border-gray-100 bg-white px-4 py-3">
+                                                <p className="text-gray-400 font-bold uppercase tracking-widest text-[9px]">Link Sent At</p>
+                                                <p className="text-gray-700 font-semibold mt-1">{fmtDate(request?.order?.paymentLinkSentAt || '')}</p>
+                                            </div>
+                                            <div className="rounded-xl border border-gray-100 bg-white px-4 py-3">
+                                                <p className="text-gray-400 font-bold uppercase tracking-widest text-[9px]">Confirmed At</p>
+                                                <p className="text-gray-700 font-semibold mt-1">{fmtDate(request?.order?.paymentConfirmedAt || '')}</p>
+                                            </div>
+                                            <div className="rounded-xl border border-gray-100 bg-white px-4 py-3 md:col-span-2">
+                                                <p className="text-gray-400 font-bold uppercase tracking-widest text-[9px]">Confirmation Source</p>
+                                                <p className="text-gray-700 font-semibold mt-1">{request?.order?.paymentConfirmationSource || 'Not confirmed yet'}</p>
+                                            </div>
+                                            <div className="rounded-xl border border-gray-100 bg-white px-4 py-3 md:col-span-2">
+                                                <p className="text-gray-400 font-bold uppercase tracking-widest text-[9px]">Ops Final Check</p>
+                                                <p className="text-gray-700 font-semibold mt-1 capitalize">{opsFinalCheckStatus || (opsFinalApproved ? 'approved' : 'pending')}</p>
+                                            </div>
+                                            <div className="rounded-xl border border-gray-100 bg-white px-4 py-3 md:col-span-2">
+                                                <p className="text-gray-400 font-bold uppercase tracking-widest text-[9px]">Stripe Payment ID</p>
+                                                <p className="text-gray-700 font-semibold mt-1 break-all">{latestPaymentReference || 'Not available yet'}</p>
+                                            </div>
+                                        </div>
                                     </div>
-                                );
-                            })}
-                            {totalEstimate > 0 && (
-                                <div className="pt-3 mt-3 border-t border-primary-100/40 flex justify-between items-center">
-                                    <span className="text-xs font-semibold text-primary-500">Estimated Total</span>
-                                    <span className="text-base font-bold" style={{ color: '#b8860b' }}>{fmt(totalEstimate)}</span>
                                 </div>
                             )}
                         </div>
-                    </div>
 
-                    {/* Buyer Notes */}
-                    {request.notes && (
-                        <div className="bg-white rounded-2xl border border-amber-200/60 overflow-hidden">
-                            <div className="px-5 py-3.5 border-b border-amber-100/40 flex items-center gap-2" style={{ background: 'rgba(245,158,11,0.03)' }}>
-                                <svg className="w-4 h-4 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 011.037-.443 48.282 48.282 0 005.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" /></svg>
-                                <h3 className="text-xs font-semibold text-amber-700">Buyer Notes</h3>
+                        {/* Floating Chat UI */}
+                        {isNegotiating && (
+                            <>
+                                {/* Chat Toggle Button */}
+                                <button
+                                    onClick={() => setIsChatOpen(!isChatOpen)}
+                                    className={`fixed bottom-8 right-8 w-16 h-16 rounded-full shadow-2xl z-50 flex items-center justify-center transition-all duration-300 hover:scale-110 active:scale-95
+                                        ${isChatOpen ? 'bg-white text-gray-900 rotate-90 ring-1 ring-gray-100' : 'bg-[#0F172A] text-white'}
+                                    `}
+                                >
+                                    {isChatOpen ? <X className="w-6 h-6" /> : <MessageSquare className="w-6 h-6" />}
+                                    {hasUnread && !isChatOpen && (
+                                        <span className="absolute top-0 right-0 w-4 h-4 bg-red-500 rounded-full border-2 border-white animate-pulse" />
+                                    )}
+                                </button>
+
+                                {/* Chat Panel */}
+                                <div className={`fixed bottom-28 right-8 w-[400px] max-w-[calc(100vw-64px)] bg-white rounded-[2.5rem] border border-gray-50 shadow-[0_20px_50px_rgba(0,0,0,0.1)] z-50 overflow-hidden flex flex-col transition-all duration-300 origin-bottom-right
+                                    ${isChatOpen ? 'scale-100 opacity-100' : 'scale-75 opacity-0 pointer-events-none'}
+                                `}>
+                                    <div className="px-8 py-6 border-b border-gray-50/50 bg-[#0F172A] text-white">
+                                        <div className="flex justify-between items-center">
+                                            <div>
+                                                <h2 className="text-lg font-bold">Buyer Negotiation</h2>
+                                                <p className="text-[11px] text-gray-400 font-bold uppercase tracking-widest mt-0.5">Live Chat with {request.user.firstName}</p>
+                                            </div>
+                                            <button onClick={() => setIsChatOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="h-[450px] overflow-y-auto p-6 space-y-6 bg-gray-50/30">
+                                        {messages.length === 0 ? (
+                                            <div className="h-full flex flex-col items-center justify-center text-center p-10">
+                                                <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-4 text-2xl shadow-sm">💬</div>
+                                                <p className="text-sm font-bold text-gray-900">Start the conversation</p>
+                                                <p className="text-[12px] text-gray-400 mt-1">Clarify details or offer a final deal.</p>
+                                            </div>
+                                        ) : (
+                                            messages.map((msg: any) => {
+                                                const isBuyer = msg.sender.userType === 'external';
+                                                const isSystem = msg.content.startsWith('[System]');
+
+                                                if (isSystem) {
+                                                    return (
+                                                        <div key={msg.id} className="flex flex-col items-center justify-center w-full py-2">
+                                                            <div className="px-5 py-1.5 bg-gray-50 rounded-full border border-gray-100 shadow-sm">
+                                                                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest text-center">
+                                                                    {msg.content.replace('[System] ', '').replace('[System]', '')}
+                                                                </p>
+                                                            </div>
+                                                            <span className="text-[8px] text-gray-300 mt-1 font-bold uppercase tracking-[0.2em]">
+                                                                {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                return (
+                                                    <div key={msg.id} className={`flex flex-col max-w-[85%] ${!isBuyer ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                                                        <div className={`px-5 py-3 rounded-[1.5rem] shadow-sm
+                                                            ${!isBuyer ? 'bg-[#0F172A] text-white rounded-br-none' : 'bg-white text-gray-900 rounded-bl-none border border-gray-100'}
+                                                        `}>
+                                                            <p className="text-[13px] leading-relaxed">{msg.content}</p>
+                                                        </div>
+                                                        <span className="text-[9px] text-gray-400 mt-1.5 font-bold uppercase tracking-widest px-1">
+                                                            {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                            {isBuyer && msg.sender.firstName ? ` • ${msg.sender.firstName}` : ''}
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })
+                                        )}
+                                        <div ref={messagesEndRef} />
+                                    </div>
+
+                                    <div className="p-4 bg-white border-t border-gray-50">
+                                        <form onSubmit={handleSendMessage} className="flex gap-2 bg-gray-50 p-1.5 rounded-[1.5rem] border border-gray-100 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
+                                            <input
+                                                type="text"
+                                                value={newMessage}
+                                                onChange={(e) => setNewMessage(e.target.value)}
+                                                placeholder="Type your reply..."
+                                                className="flex-1 bg-transparent px-4 py-2 text-[13px] font-medium outline-none"
+                                            />
+                                            <button
+                                                type="submit"
+                                                disabled={!newMessage.trim()}
+                                                className="w-10 h-10 bg-[#0F172A] text-white rounded-full flex items-center justify-center hover:bg-black transition-all disabled:opacity-30 shadow-md"
+                                            >
+                                                <Send className="w-4 h-4 ml-0.5" />
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+
+                        {/* RIGHT: Sidebar Area */}
+                        <div className="w-full lg:w-[400px] flex flex-col gap-6 lg:self-stretch">
+                            <div className="bg-white rounded-[2.2rem] border border-gray-100 shadow-[0_8px_30px_rgb(15,23,42,0.03)] p-8">
+                                <div className="flex justify-between items-start">
+                                    <h2 className="text-xl font-bold text-gray-900 leading-tight">Request<br />Summary</h2>
+                                    <span className="px-3 py-1.5 bg-indigo-50/80 text-indigo-500 rounded-xl text-[9px] font-bold uppercase tracking-widest">
+                                        Insights
+                                    </span>
+                                </div>
+
+                                <div className="mt-6 space-y-5">
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-[11px] text-gray-400 font-bold uppercase tracking-widest">Estimated Value</span>
+                                        <span className="text-[14px] font-bold text-gray-900">{fmt(totalEstimate)}</span>
+                                    </div>
+
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-[11px] text-gray-400 font-bold uppercase tracking-widest">Margin Opportunity</span>
+                                        <span className="text-[14px] font-bold text-emerald-600">{fmt(marginOpportunity)}</span>
+                                    </div>
+                                </div>
+
+                                <Link
+                                    href="/sales/requests"
+                                    className="mt-8 block w-full py-4 bg-[#0F172A] text-white rounded-[1.5rem] text-center text-[10px] font-bold uppercase tracking-[0.15em] hover:bg-black transition-colors"
+                                >
+                                    Back to Requests
+                                </Link>
                             </div>
-                            <div className="p-5">
-                                <p className="text-sm text-primary-700 leading-relaxed">{request.notes}</p>
+
+                            <div className="bg-white rounded-[2.2rem] border border-gray-100 shadow-[0_8px_30px_rgb(15,23,42,0.03)] overflow-hidden flex flex-col flex-1">
+                                <div className="px-8 py-6 flex justify-between items-center border-b border-gray-50/50">
+                                    <h2 className="text-lg font-bold text-gray-900">Sent Versions</h2>
+                                    <span className="text-[9px] font-bold text-gray-300 uppercase tracking-widest">
+                                        {iterations.length} Total
+                                    </span>
+                                </div>
+
+                                <div className="p-4 space-y-3">
+                                    {iterations.length === 0 ? (
+                                        <div className="p-8 text-center">
+                                            <p className="text-[12px] font-medium text-gray-400 italic">No quotes sent yet.</p>
+                                        </div>
+                                    ) : (
+                                        iterations.map((it) => {
+                                            const isLatest = it.id === latestIterationId;
+                                            const quote = quotationById.get(it.id);
+                                            const versionItems = (quote?.items || []).map((qi) => ({
+                                                ...qi,
+                                                name: getName(cartItemById.get(qi.cartItemId) as CartItem),
+                                            }));
+                                            const isExpanded = expandedVersionId === it.id;
+                                            const iterationStatus = isLatest
+                                                ? latestIterationStatus
+                                                : deriveCanonicalWorkflowStatus({ latestQuotationStatus: it.status });
+                                            return (
+                                                <div
+                                                    key={it.id}
+                                                    className={`p-4 rounded-2xl border group transition-all ${isLatest ? 'bg-indigo-50/50 border-indigo-200' : 'bg-gray-50/70 border-gray-100 hover:bg-white hover:shadow-sm'}`}
+                                                >
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div className="min-w-0">
+                                                            <div className="flex items-center gap-2.5">
+                                                                <span className="text-[11px] font-bold text-gray-900 capitalize">{it.type}</span>
+                                                                <span className="text-[9px] text-gray-500 font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-white ring-1 ring-gray-200">
+                                                                    {canonicalStatusDisplayLabel(iterationStatus)}
+                                                                </span>
+                                                                {isLatest && (
+                                                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 font-bold uppercase tracking-widest">Latest</span>
+                                                                )}
+                                                            </div>
+                                                            <p className="text-[10px] text-gray-400 mt-0.5">{it.at ? fmtDate(it.at) : '—'}</p>
+                                                            <p className="text-[10px] text-gray-500 mt-1">
+                                                                {versionItems.length} item{versionItems.length !== 1 ? 's' : ''} priced
+                                                            </p>
+                                                        </div>
+                                                        <div className="text-right pl-3 shrink-0">
+                                                            <p className="text-[13px] font-bold text-gray-900 tabular-nums">
+                                                                {fmtMoney(Number(quote?.quotedTotal ?? it.amount ?? 0))}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="mt-3 pt-3 border-t border-gray-100/80">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setExpandedVersionId(isExpanded ? null : it.id)}
+                                                            className="text-[10px] font-bold uppercase tracking-widest text-indigo-600 hover:text-indigo-700"
+                                                        >
+                                                            {isExpanded ? 'Hide item prices' : 'View item prices'}
+                                                        </button>
+                                                    </div>
+
+                                                    {isExpanded && (
+                                                        <div className="w-full mt-2 space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                                                            {versionItems.length === 0 ? (
+                                                                <p className="text-[10px] text-gray-400">No item-level pricing snapshot found for this version.</p>
+                                                            ) : (
+                                                                versionItems.map((line) => (
+                                                                    <div key={`${it.id}-${line.cartItemId}`} className="flex items-center justify-between gap-3 text-[10px]">
+                                                                        <div className="min-w-0">
+                                                                            <p className="font-semibold text-gray-700 truncate">{line.name}</p>
+                                                                            <p className="text-gray-400">
+                                                                                {line.quantity} × {fmtMoney(Number(line.finalUnitPrice || 0))}
+                                                                            </p>
+                                                                        </div>
+                                                                        <p className="font-bold text-gray-800 tabular-nums whitespace-nowrap">
+                                                                            {fmtMoney(Number(line.lineTotal || (Number(line.finalUnitPrice || 0) * Number(line.quantity || 0))))}
+                                                                        </p>
+                                                                    </div>
+                                                                ))
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
                             </div>
+
                         </div>
-                    )}
+                    </div>
                 </div>
             </div>
         </main>

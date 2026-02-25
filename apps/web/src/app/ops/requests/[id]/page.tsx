@@ -43,6 +43,16 @@ interface RequestDetail {
     validatedByOps?: { id: string; firstName?: string; lastName?: string } | null;
 }
 
+interface RelatedOrder {
+    id: string;
+    orderNumber: string;
+    status: string;
+    opsFinalCheckStatus?: string | null;
+    opsFinalCheckedAt?: string | null;
+    opsFinalCheckReason?: string | null;
+    quotation?: { cartId?: string | null } | null;
+}
+
 interface SalesMember {
     id: string;
     email: string;
@@ -125,8 +135,8 @@ function getImg(item: CartItem) {
 function getName(item: CartItem) {
     return item.recommendationItem?.inventorySku?.name || item.recommendationItem?.manufacturerItem?.title || item.recommendationItem?.manufacturerItem?.name || item.recommendationItem?.title || 'Product';
 }
-function fmt(n: number) { return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
-function fmtDec(n: number) { return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmt(n: number) { return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 }); }
+function fmtDec(n: number) { return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 const invStatusStyles: Record<string, { label: string; bg: string; color: string; icon: string }> = {
     in_stock:       { label: 'In Stock',       bg: 'rgba(16,185,129,0.08)',  color: '#047857', icon: '✓' },
@@ -300,6 +310,8 @@ export default function OpsRequestDetailPage() {
 
     // Status update
     const [statusUpdating, setStatusUpdating] = useState(false);
+    const [relatedOrder, setRelatedOrder] = useState<RelatedOrder | null>(null);
+    const [finalCheckUpdating, setFinalCheckUpdating] = useState(false);
 
     const loadRequest = useCallback(async () => {
         try {
@@ -313,6 +325,19 @@ export default function OpsRequestDetailPage() {
     }, [cartId]);
 
     useEffect(() => { loadRequest(); }, [loadRequest]);
+
+    useEffect(() => {
+        const loadRelatedOrder = async () => {
+            try {
+                const orders = await api.getOpsOrders() as RelatedOrder[];
+                const linked = orders.find((o) => (o.quotation?.cartId || '') === cartId) || null;
+                setRelatedOrder(linked);
+            } catch {
+                setRelatedOrder(null);
+            }
+        };
+        loadRelatedOrder();
+    }, [cartId, request?.quotations?.length]);
 
     const handleValidateInventory = async () => {
         setValidating(true);
@@ -368,6 +393,37 @@ export default function OpsRequestDetailPage() {
             alert(err instanceof Error ? err.message : 'Failed');
         } finally {
             setStatusUpdating(false);
+        }
+    };
+
+    const handleApproveFinalCheck = async () => {
+        if (!relatedOrder) return;
+        setFinalCheckUpdating(true);
+        try {
+            await api.approveOpsFinalCheck(relatedOrder.id);
+            const orders = await api.getOpsOrders() as RelatedOrder[];
+            setRelatedOrder(orders.find((o) => (o.quotation?.cartId || '') === cartId) || null);
+            await loadRequest();
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Failed to approve final check');
+        } finally {
+            setFinalCheckUpdating(false);
+        }
+    };
+
+    const handleRejectFinalCheck = async () => {
+        if (!relatedOrder) return;
+        const reason = window.prompt('Reason for rejection (optional):') || undefined;
+        setFinalCheckUpdating(true);
+        try {
+            await api.rejectOpsFinalCheck(relatedOrder.id, reason);
+            const orders = await api.getOpsOrders() as RelatedOrder[];
+            setRelatedOrder(orders.find((o) => (o.quotation?.cartId || '') === cartId) || null);
+            await loadRequest();
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Failed to reject final check');
+        } finally {
+            setFinalCheckUpdating(false);
         }
     };
 
@@ -674,7 +730,7 @@ export default function OpsRequestDetailPage() {
                                     <div key={q.id} className="flex items-center justify-between p-3 rounded-xl" style={{ background: 'rgba(16,42,67,0.015)', border: '1px solid rgba(16,42,67,0.06)' }}>
                                         <div>
                                             <p className="text-sm font-semibold text-primary-900">{q.quotationNumber || `#${q.id.slice(0, 8)}`}</p>
-                                            <p className="text-xs text-primary-400">${Number(q.quotedTotal || 0).toLocaleString()}</p>
+                                            <p className="text-xs text-primary-400">₹${Number(q.quotedTotal || 0).toLocaleString()}</p>
                                         </div>
                                         <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${q.status === 'sent' ? 'bg-emerald-50 text-emerald-600' : q.status === 'accepted' ? 'bg-green-50 text-green-700' : 'bg-primary-50 text-primary-500'}`}>
                                             {q.status}
@@ -688,6 +744,66 @@ export default function OpsRequestDetailPage() {
 
                 {/* RIGHT — Actions */}
                 <div className="lg:col-span-4 space-y-5">
+                    <div className="bg-white rounded-2xl border border-primary-100/60 p-5">
+                        <div className="flex items-center justify-between gap-3">
+                            <h3 className="text-[10px] font-semibold text-primary-400 uppercase tracking-wider">Ops Final Validation</h3>
+                            <span className={`text-[10px] font-semibold px-2 py-1 rounded-md ${!relatedOrder
+                                ? 'bg-primary-50 text-primary-400'
+                                : (relatedOrder.opsFinalCheckStatus || '').toLowerCase() === 'approved'
+                                    ? 'bg-emerald-50 text-emerald-700'
+                                    : (relatedOrder.opsFinalCheckStatus || '').toLowerCase() === 'rejected'
+                                        ? 'bg-red-50 text-red-700'
+                                        : 'bg-amber-50 text-amber-700'
+                                }`}>
+                                {!relatedOrder ? 'WAITING ORDER' : ((relatedOrder.opsFinalCheckStatus || 'pending').toUpperCase())}
+                            </span>
+                        </div>
+                        <p className="text-xs text-primary-500 mt-2">
+                            Pass or fail the final check after final offer acceptance and before payment link.
+                        </p>
+
+                        {!relatedOrder ? (
+                            <p className="mt-3 text-xs text-primary-400">
+                                Action unlocks once buyer accepts the final offer.
+                            </p>
+                        ) : (
+                            <div className="mt-3 space-y-2">
+                                <p className="text-xs text-primary-600">
+                                    <span className="font-semibold text-primary-800">Order:</span> {relatedOrder.orderNumber}
+                                </p>
+                                {(relatedOrder.opsFinalCheckStatus || '').toLowerCase() === 'rejected' && relatedOrder.opsFinalCheckReason && (
+                                    <div className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-2.5 py-2">
+                                        Reason: {relatedOrder.opsFinalCheckReason}
+                                    </div>
+                                )}
+                                <div className="grid grid-cols-2 gap-2 pt-1">
+                                    <button
+                                        onClick={handleApproveFinalCheck}
+                                        disabled={
+                                            finalCheckUpdating
+                                            || (relatedOrder.opsFinalCheckStatus || '').toLowerCase() === 'approved'
+                                            || (relatedOrder.status || '').toLowerCase() === 'cancelled'
+                                        }
+                                        className="px-2.5 py-2 rounded-lg text-xs font-semibold bg-emerald-50 border border-emerald-200 text-emerald-700 disabled:opacity-50"
+                                    >
+                                        {finalCheckUpdating ? 'Saving…' : 'Pass'}
+                                    </button>
+                                    <button
+                                        onClick={handleRejectFinalCheck}
+                                        disabled={
+                                            finalCheckUpdating
+                                            || (relatedOrder.opsFinalCheckStatus || '').toLowerCase() === 'rejected'
+                                            || (relatedOrder.status || '').toLowerCase() === 'cancelled'
+                                        }
+                                        className="px-2.5 py-2 rounded-lg text-xs font-semibold bg-red-50 border border-red-200 text-red-700 disabled:opacity-50"
+                                    >
+                                        {finalCheckUpdating ? 'Saving…' : 'Fail & Close'}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
                     {canForward && (
                         <div className="bg-white rounded-2xl border-2 border-blue-100 p-5">
                             <h3 className="text-xs font-semibold text-blue-700 uppercase tracking-wider mb-3">🚀 Forward to Sales</h3>

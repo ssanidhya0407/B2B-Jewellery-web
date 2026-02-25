@@ -14,11 +14,18 @@ interface DashboardMetrics {
 
 export default function OpsDashboardPage() {
     const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
+    const [readyOrders, setReadyOrders] = useState<Array<{ id: string; orderNumber?: string; buyer?: { companyName?: string; email?: string } }>>([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        api.getOperationsDashboard()
-            .then((res) => setMetrics(res as DashboardMetrics))
+        Promise.all([
+            api.getOperationsDashboard(),
+            api.getOpsOrders('confirmed').catch(() => []),
+        ])
+            .then(([dashboard, orders]) => {
+                setMetrics(dashboard as DashboardMetrics);
+                setReadyOrders((orders as Array<{ id: string; orderNumber?: string; buyer?: { companyName?: string; email?: string } }>).slice(0, 5));
+            })
             .catch(() => {})
             .finally(() => setLoading(false));
     }, []);
@@ -26,7 +33,7 @@ export default function OpsDashboardPage() {
     const stats = metrics ? [
         { label: 'New Requests', value: metrics.newQuoteRequests, color: '#f59e0b', bg: 'rgba(245,158,11,0.06)', href: '/ops/requests' },
         { label: 'Pending Quotes', value: metrics.pendingQuotes, color: '#2563eb', bg: 'rgba(37,99,235,0.06)', href: '/ops/requests' },
-        { label: 'Active Orders', value: metrics.activeOrders, color: '#10b981', bg: 'rgba(16,185,129,0.06)', href: '/ops/orders' },
+        { label: 'Ready to Process', value: readyOrders.length, color: '#10b981', bg: 'rgba(16,185,129,0.06)', href: '/ops/orders?status=confirmed' },
         { label: 'Inventory Items', value: metrics.totalInventory, color: '#8b5cf6', bg: 'rgba(139,92,246,0.06)', href: '/ops/inventory' },
         { label: 'Pending Approval', value: metrics.pendingApproval, color: '#ef4444', bg: 'rgba(239,68,68,0.06)', href: '/ops/products' },
     ] : [];
@@ -113,6 +120,22 @@ export default function OpsDashboardPage() {
                                     </div>
                                 ))}
                             </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-primary-100/60 bg-white p-6">
+                            <h2 className="font-display text-lg font-semibold text-primary-900 mb-4">Ready to Process</h2>
+                            {readyOrders.length === 0 ? (
+                                <p className="text-sm text-primary-400">No paid orders have been handed off by Sales yet.</p>
+                            ) : (
+                                <div className="space-y-3">
+                                    {readyOrders.map((order) => (
+                                        <Link key={order.id} href="/ops/orders?status=confirmed" className="block p-3 rounded-xl hover:bg-primary-50 transition-colors">
+                                            <p className="text-sm font-semibold text-primary-900">{order.orderNumber || order.id.slice(0, 8)}</p>
+                                            <p className="text-xs text-primary-400">{order.buyer?.companyName || order.buyer?.email || 'Buyer'}</p>
+                                        </Link>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </>

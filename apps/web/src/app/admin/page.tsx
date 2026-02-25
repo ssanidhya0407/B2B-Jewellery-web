@@ -53,7 +53,7 @@ export default function AdminDashboardPage() {
     ];
 
     return (
-        <main className="py-8 px-4 sm:px-6 lg:px-8 max-w-6xl mx-auto">
+        <main className="py-12 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
             {/* Welcome Banner */}
             <div className="relative rounded-2xl overflow-hidden mb-8 p-6 sm:p-8" style={{ background: 'linear-gradient(135deg, #102a43 0%, #1a3a54 40%, #334e68 100%)' }}>
                 <div className="absolute top-0 right-0 w-72 h-72 -translate-y-1/3 translate-x-1/3 rounded-full opacity-10"

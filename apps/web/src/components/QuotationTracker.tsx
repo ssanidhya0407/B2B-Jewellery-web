@@ -1,4 +1,6 @@
 'use client';
+import { deriveCanonicalWorkflowStatus } from '@/lib/workflow';
+import { canonicalStatusBadgeClass, canonicalStatusDisplayLabel } from '@/lib/workflow-ui';
 
 /* ═══════════════════════════════════════════════════════════════
    QuotationTracker — Shared visual timeline component
@@ -6,7 +8,7 @@
    Used by buyer (/app/quotations), ops (/ops/requests), and sales (/sales/requests)
    ═══════════════════════════════════════════════════════════════ */
 
-interface TimelineEntry {
+export interface TimelineEntry {
     phase: number;
     label: string;
     status: 'completed' | 'active' | 'pending' | 'expired' | 'rejected';
@@ -16,7 +18,7 @@ interface TimelineEntry {
     details?: Record<string, unknown>;
 }
 
-interface TrackerData {
+export interface TrackerData {
     cart: {
         id: string;
         status: string;
@@ -64,10 +66,10 @@ const statusStyles: Record<string, { bg: string; border: string; dot: string; te
         line: '#3b82f6',
     },
     pending: {
-        bg: 'rgba(16,42,67,0.02)',
-        border: 'rgba(16,42,67,0.06)',
-        dot: '#cbd5e1',
-        text: '#94a3b8',
+        bg: 'rgba(248,250,252,1)',
+        border: 'rgba(226,232,240,1)',
+        dot: '#94a3b8',
+        text: '#64748b',
         line: '#e2e8f0',
     },
     expired: {
@@ -105,6 +107,78 @@ function formatTimestamp(ts?: string): string {
     });
 }
 
+function isBuyerVisibleTimelineEntry(entry: TimelineEntry): boolean {
+    const label = (entry.label || '').toLowerCase();
+    const hiddenForBuyer = [
+        'commission',
+        'payout',
+        'margin',
+        'balance payment requested',
+        'procurement',
+        'prices adjusted',
+    ];
+    return !hiddenForBuyer.some((token) => label.includes(token));
+}
+
+function sanitizeDetailsForRole(details: Record<string, unknown>, role: 'buyer' | 'operations' | 'sales' | 'admin') {
+    if (role !== 'buyer') return details;
+    const buyerAllowed = new Set([
+        'quotedTotal',
+        'expiresAt',
+        'paidAmount',
+        'totalAmount',
+        'method',
+        'source',
+        'orderNumber',
+        'trackingNumber',
+        'carrier',
+    ]);
+    return Object.fromEntries(Object.entries(details).filter(([key]) => buyerAllowed.has(key)));
+}
+
+function detailLabel(key: string): string {
+    const mapped: Record<string, string> = {
+        quotedTotal: 'Quoted Total',
+        expiresAt: 'Expires At',
+        paidAmount: 'Paid Amount',
+        totalAmount: 'Order Total',
+        method: 'Payment Method',
+        source: 'Confirmation Source',
+        orderNumber: 'Order Number',
+        trackingNumber: 'Tracking Number',
+        carrier: 'Carrier',
+        itemsValidated: 'Items Validated',
+        totalItems: 'Total Items',
+        rounds: 'Rounds',
+        lastRoundTotal: 'Last Round Total',
+        salesPerson: 'Sales Person',
+        status: 'Status',
+        update: 'Update',
+        amount: 'Amount',
+        rate: 'Rate',
+        received: 'Received',
+        total: 'Total',
+    };
+    return mapped[key] || key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+}
+
+function detailValue(key: string, val: unknown): string {
+    if (val === null || val === undefined) return '';
+    if (key === 'expiresAt' || key.endsWith('At')) return formatTimestamp(String(val));
+    if (typeof val === 'number') {
+        if (['quotedTotal', 'paidAmount', 'totalAmount', 'lastRoundTotal', 'amount'].includes(key)) {
+            return `₹${val.toLocaleString('en-IN')}`;
+        }
+        if (key === 'rate') return `${val}%`;
+        return val.toLocaleString('en-IN');
+    }
+    if (typeof val === 'string') {
+        if (key === 'method') return val.replaceAll('_', ' ');
+        return val;
+    }
+    return String(val);
+}
+
 export default function QuotationTracker({
     data,
     role = 'buyer',
@@ -113,37 +187,49 @@ export default function QuotationTracker({
     role?: 'buyer' | 'operations' | 'sales' | 'admin';
 }) {
     const { cart, latestQuotation, timeline } = data;
+    const visibleTimeline = role === 'buyer'
+        ? timeline.filter(isBuyerVisibleTimelineEntry)
+        : timeline;
+    const trackerStatus = deriveCanonicalWorkflowStatus({
+        cartStatus: cart.status,
+        latestQuotationStatus: latestQuotation?.status,
+        order: latestQuotation?.order
+            ? {
+                id: latestQuotation.order.id,
+                status: latestQuotation.order.status,
+                totalAmount: Number(latestQuotation.order.totalAmount || 0),
+                paidAmount: Number(latestQuotation.order.paidAmount || 0),
+            }
+            : null,
+        opsForwarded: Boolean(cart.assignedSales),
+    });
 
     return (
-        <div className="bg-white rounded-2xl border border-primary-100/60 overflow-hidden">
+        <div className="bg-white rounded-3xl border border-gray-100 overflow-hidden shadow-[0_8px_30px_rgb(0,0,0,0.02)]">
             {/* ─── Header ─── */}
-            <div className="px-6 py-5 border-b border-primary-100/40" style={{ background: 'linear-gradient(135deg, rgba(184,134,11,0.03) 0%, rgba(212,165,55,0.02) 100%)' }}>
+            <div className="px-8 py-6 border-b border-gray-50/50 bg-gray-50/30">
                 <div className="flex items-center justify-between">
                     <div>
                         <div className="flex items-center gap-2.5">
-                            <h2 className="font-display text-base font-bold text-primary-900">
+                            <h2 className="text-lg font-bold text-gray-900 tracking-tight">
                                 {latestQuotation?.quotationNumber || `Request #${cart.id.slice(0, 8)}`}
                             </h2>
                             <span
-                                className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full"
-                                style={{
-                                    background: cart.status === 'quoted' ? 'rgba(16,185,129,0.08)' : cart.status === 'submitted' ? 'rgba(245,158,11,0.08)' : 'rgba(59,130,246,0.08)',
-                                    color: cart.status === 'quoted' ? '#047857' : cart.status === 'submitted' ? '#b45309' : '#1d4ed8',
-                                }}
+                                className={`text-[11px] font-bold px-2.5 py-1 rounded-md uppercase tracking-widest ring-1 ${canonicalStatusBadgeClass(trackerStatus)}`}
                             >
-                                {cart.status.replace(/_/g, ' ')}
+                                {canonicalStatusDisplayLabel(trackerStatus)}
                             </span>
                         </div>
-                        <p className="text-sm text-primary-400 mt-1">
+                        <p className="text-[12px] text-gray-400 font-medium mt-1.5 uppercase tracking-wider">
                             {role === 'buyer'
-                                ? `${cart.itemCount} items · ${latestQuotation ? `Quote: $${Number(latestQuotation.quotedTotal || 0).toLocaleString()}` : 'Awaiting quote'}`
+                                ? `${cart.itemCount} items · ${latestQuotation ? `Quote: ₹${Number(latestQuotation.quotedTotal || 0).toLocaleString('en-IN')}` : 'Awaiting quote'}`
                                 : `${cart.buyer.companyName || cart.buyer.email} · ${cart.itemCount} items`}
                         </p>
                     </div>
                     {latestQuotation?.order && (
                         <div className="text-right">
-                            <p className="text-[10px] uppercase tracking-wider text-primary-400 font-semibold">Order</p>
-                            <p className="text-sm font-bold text-primary-900">{latestQuotation.order.orderNumber}</p>
+                            <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">Order</p>
+                            <p className="text-[14px] font-bold text-gray-900 mt-0.5">{latestQuotation.order.orderNumber}</p>
                         </div>
                     )}
                 </div>
@@ -152,9 +238,10 @@ export default function QuotationTracker({
             {/* ─── Timeline ─── */}
             <div className="px-6 py-5">
                 <div className="relative">
-                    {timeline.map((entry, idx) => {
+                    {visibleTimeline.map((entry, idx) => {
                         const style = statusStyles[entry.status] || statusStyles.pending;
-                        const isLast = idx === timeline.length - 1;
+                        const isLast = idx === visibleTimeline.length - 1;
+                        const safeDetails = entry.details ? sanitizeDetailsForRole(entry.details, role) : null;
 
                         return (
                             <div key={`${entry.phase}-${idx}`} className="relative flex gap-4 pb-6 last:pb-0">
@@ -201,12 +288,12 @@ export default function QuotationTracker({
                                         )}
                                     </div>
 
-                                    <div className="flex items-center gap-2 text-xs text-primary-400">
+                                    <div className="flex items-center gap-2 text-[11px] font-medium text-gray-400">
                                         {entry.timestamp && (
                                             <span>{formatTimestamp(entry.timestamp)}</span>
                                         )}
                                         {entry.actorName && entry.timestamp && (
-                                            <span className="w-px h-3 bg-primary-200" />
+                                            <span className="w-px h-3 bg-gray-200" />
                                         )}
                                         {entry.actorName && (
                                             <span>{entry.actorName}</span>
@@ -214,19 +301,12 @@ export default function QuotationTracker({
                                     </div>
 
                                     {/* Detail chips */}
-                                    {entry.details && Object.keys(entry.details).length > 0 && (
+                                    {safeDetails && Object.keys(safeDetails).length > 0 && (
                                         <div className="flex flex-wrap gap-1.5 mt-2">
-                                            {Object.entries(entry.details).map(([key, val]) => {
+                                            {Object.entries(safeDetails).map(([key, val]) => {
                                                 if (val === null || val === undefined) return null;
-                                                const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
-                                                let displayVal = String(val);
-                                                if (key === 'expiresAt' || key.includes('At')) {
-                                                    displayVal = formatTimestamp(String(val));
-                                                } else if (typeof val === 'number') {
-                                                    displayVal = key.includes('mount') || key.includes('otal') || key.includes('alue') || key.includes('amount')
-                                                        ? `$${val.toLocaleString()}`
-                                                        : val.toLocaleString();
-                                                }
+                                                const label = detailLabel(key);
+                                                const displayVal = detailValue(key, val);
                                                 return (
                                                     <span
                                                         key={key}
@@ -234,7 +314,7 @@ export default function QuotationTracker({
                                                         style={{ background: style.bg, color: style.text, border: `1px solid ${style.border}` }}
                                                     >
                                                         <span className="opacity-70 mr-1">{label}:</span>
-                                                        <span className="font-semibold">{displayVal}</span>
+                                                        <span className={`font-semibold ${key === 'trackingNumber' || key === 'orderNumber' ? 'font-mono' : ''}`}>{displayVal}</span>
                                                     </span>
                                                 );
                                             })}
@@ -246,7 +326,7 @@ export default function QuotationTracker({
                     })}
 
                     {/* Empty state */}
-                    {timeline.length === 0 && (
+                    {visibleTimeline.length === 0 && (
                         <div className="text-center py-8">
                             <p className="text-sm text-primary-400">No activity yet</p>
                         </div>
@@ -258,20 +338,20 @@ export default function QuotationTracker({
             {latestQuotation && (
                 <div className="px-6 py-4 border-t border-primary-100/40" style={{ background: 'rgba(16,42,67,0.015)' }}>
                     <div className="flex items-center justify-between text-xs">
-                        <div className="flex items-center gap-4">
-                            <span className="text-primary-400">
-                                Quote: <span className="font-semibold text-primary-700">{latestQuotation.quotationNumber || latestQuotation.id.slice(0, 8)}</span>
+                        <div className="flex items-center gap-6">
+                            <span className="text-gray-400 font-medium">
+                                Quote: <span className="font-bold text-gray-700 ml-1">{latestQuotation.quotationNumber || latestQuotation.id.slice(0, 8)}</span>
                             </span>
-                            <span className="text-primary-400">
-                                Total: <span className="font-semibold text-primary-700">${Number(latestQuotation.quotedTotal || 0).toLocaleString()}</span>
+                            <span className="text-gray-400 font-medium">
+                                Total: <span className="font-bold text-gray-700 ml-1">₹{Number(latestQuotation.quotedTotal || 0).toLocaleString('en-IN')}</span>
                             </span>
                             {latestQuotation.negotiation && (
-                                <span className="text-primary-400">
-                                    Negotiation: <span className="font-semibold text-primary-700">{latestQuotation.negotiation.rounds.length} rounds</span>
+                                <span className="text-gray-400 font-medium">
+                                    Negotiation: <span className="font-bold text-gray-700 ml-1">{latestQuotation.negotiation.rounds.length} rounds</span>
                                 </span>
                             )}
                         </div>
-                        {latestQuotation.expiresAt && latestQuotation.status === 'sent' && (
+                        {latestQuotation.expiresAt && trackerStatus === 'QUOTED' && (
                             <span className="text-amber-600 font-medium">
                                 Expires {formatTimestamp(latestQuotation.expiresAt)}
                             </span>

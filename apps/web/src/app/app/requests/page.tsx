@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
+import { deriveCanonicalWorkflowStatus, type CanonicalWorkflowStatus } from '@/lib/workflow';
+import { canonicalStatusBadgeClass, canonicalStatusDisplayLabel } from '@/lib/workflow-ui';
 
 interface CartSummary {
     id: string;
@@ -12,31 +14,59 @@ interface CartSummary {
     items: Array<{ id: string }>;
 }
 
-const statusConfig: Record<string, { label: string; bg: string; color: string; step: number }> = {
-    draft: { label: 'Draft', bg: 'rgba(16,42,67,0.06)', color: '#486581', step: 0 },
-    submitted: { label: 'Submitted', bg: 'rgba(232,185,49,0.1)', color: '#8f631a', step: 1 },
-    quoted: { label: 'Quoted', bg: 'rgba(16,185,129,0.08)', color: '#047857', step: 2 },
-    accepted: { label: 'Accepted', bg: 'rgba(16,185,129,0.08)', color: '#047857', step: 3 },
-    expired: { label: 'Expired', bg: 'rgba(239,68,68,0.06)', color: '#b91c1c', step: -1 },
-};
+interface BuyerOrderSummary {
+    id: string;
+    status: string;
+    totalAmount?: number;
+    paidAmount?: number;
+    paymentLinkSentAt?: string | null;
+    paymentConfirmedAt?: string | null;
+    forwardedToOpsAt?: string | null;
+    createdAt: string;
+    payments?: Array<{ status?: string; paidAt?: string | null; createdAt?: string }>;
+    quotation?: { cartId?: string };
+}
 
 const timelineSteps = [
     { label: 'Submitted', step: 1 },
     { label: 'In Review', step: 1.5 },
     { label: 'Quoted', step: 2 },
-    { label: 'Accepted', step: 3 },
+    { label: 'Closed', step: 3 },
 ];
+
+function stepForCanonical(status: CanonicalWorkflowStatus): number {
+    if (status === 'SUBMITTED') return 1;
+    if (status === 'UNDER_REVIEW' || status === 'OPS_FORWARDED') return 1.5;
+    if (status === 'QUOTED' || status === 'COUNTER' || status === 'FINAL') return 2;
+    if (['ACCEPTED_PENDING_OPS_RECHECK', 'ACCEPTED_PAYMENT_PENDING', 'PAYMENT_LINK_SENT', 'PAID_CONFIRMED', 'READY_FOR_OPS', 'IN_OPS_PROCESSING', 'CLOSED_ACCEPTED'].includes(status)) return 3;
+    if (status === 'CLOSED_DECLINED') return -1;
+    return 0;
+}
 
 export default function RequestsPage() {
     const [carts, setCarts] = useState<CartSummary[]>([]);
+    const [ordersByCartId, setOrdersByCartId] = useState<Record<string, BuyerOrderSummary>>({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
         const fetchCarts = async () => {
             try {
-                const result = await api.getCarts() as CartSummary[];
+                const [result, myOrders] = await Promise.all([
+                    api.getCarts() as Promise<CartSummary[]>,
+                    api.getMyOrders() as Promise<BuyerOrderSummary[]>,
+                ]);
                 setCarts(result);
+                const mapped: Record<string, BuyerOrderSummary> = {};
+                for (const order of myOrders || []) {
+                    const cartId = order.quotation?.cartId;
+                    if (!cartId) continue;
+                    const existing = mapped[cartId];
+                    if (!existing || new Date(order.createdAt).getTime() > new Date(existing.createdAt).getTime()) {
+                        mapped[cartId] = order;
+                    }
+                }
+                setOrdersByCartId(mapped);
             } catch (err) {
                 setError(err instanceof Error ? err.message : 'Failed to load requests');
             } finally {
@@ -178,8 +208,25 @@ export default function RequestsPage() {
                 {!loading && !error && carts.length > 0 && (
                     <div className="space-y-3 stagger-children">
                         {carts.map((cart) => {
-                            const s = statusConfig[cart.status] || statusConfig.draft;
-                            const currentStep = s.step;
+                            const order = ordersByCartId[cart.id];
+                            const canonical = deriveCanonicalWorkflowStatus({
+                                cartStatus: cart.status,
+                                order: order ? {
+                                    id: order.id,
+                                    status: order.status,
+                                    paymentLinkSentAt: order.paymentLinkSentAt || null,
+                                    paymentConfirmedAt: order.paymentConfirmedAt || null,
+                                    forwardedToOpsAt: order.forwardedToOpsAt || null,
+                                    totalAmount: Number(order.totalAmount || 0),
+                                    paidAmount: Number(order.paidAmount || 0),
+                                    payments: order.payments?.map((p) => ({
+                                        status: p.status || '',
+                                        paidAt: p.paidAt || undefined,
+                                        createdAt: p.createdAt || undefined,
+                                    })),
+                                } : null,
+                            });
+                            const currentStep = stepForCanonical(canonical);
                             const showTimeline = cart.status !== 'draft' && currentStep >= 0;
                             return (
                                 <Link
@@ -190,17 +237,17 @@ export default function RequestsPage() {
                                     <div className="flex items-center justify-between">
                                         <div className="flex items-center gap-4">
                                             <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
-                                                style={{ background: s.bg }}
+                                                style={{ background: 'rgba(16,42,67,0.06)' }}
                                             >
-                                                <svg className="w-5 h-5" style={{ color: s.color }} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                                                <svg className="w-5 h-5 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                                                     <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
                                                 </svg>
                                             </div>
                                             <div>
                                                 <div className="flex items-center gap-2 mb-0.5">
                                                     <span className="font-medium text-primary-900 text-sm">{cart.items.length} {cart.items.length === 1 ? 'product' : 'products'}</span>
-                                                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: s.bg, color: s.color }}>
-                                                        {s.label}
+                                                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${canonicalStatusBadgeClass(canonical)}`}>
+                                                        {canonicalStatusDisplayLabel(canonical)}
                                                     </span>
                                                 </div>
                                                 <p className="text-xs text-primary-400">
@@ -259,12 +306,12 @@ export default function RequestsPage() {
                                     )}
 
                                     {/* Expired banner */}
-                                    {cart.status === 'expired' && (
+                                    {canonical === 'CLOSED_DECLINED' && (
                                         <div className="mt-3 pt-3 border-t flex items-center gap-2 text-xs" style={{ borderColor: 'rgba(239,68,68,0.1)', color: '#b91c1c' }}>
                                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                                                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
                                             </svg>
-                                            Quote expired — contact sales to refresh
+                                            Request closed — contact sales to refresh
                                         </div>
                                     )}
                                 </Link>

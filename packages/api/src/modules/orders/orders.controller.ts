@@ -7,7 +7,7 @@ export class OrdersController {
     constructor(
         private ordersService: OrdersService,
         private salesService: SalesService,
-    ) {}
+    ) { }
 
     @Get('my-quotations')
     async getMyQuotations(@Request() req: { user: { id: string } }) {
@@ -33,9 +33,32 @@ export class OrdersController {
         return this.ordersService.rejectQuotation(id, req.user.id, body.reason);
     }
 
+    @Post('quotations/:id/counter')
+    async counterOffer(
+        @Param('id') id: string,
+        @Request() req: { user: { id: string } },
+        @Body('items') items: Array<{ cartItemId: string; finalUnitPrice: number }>,
+    ) {
+        return this.ordersService.counterOffer(id, req.user.id, items);
+    }
+
     @Get('tracker/:cartId')
     async getQuotationTracker(@Param('cartId') cartId: string) {
         return this.salesService.getQuotationTracker(cartId);
+    }
+
+    @Get('tracker/:cartId/messages')
+    async getQuotationMessages(@Param('cartId') cartId: string, @Request() req: { user: { id: string } }) {
+        return this.ordersService.getQuotationMessages(cartId, req.user.id);
+    }
+
+    @Post('tracker/:cartId/messages')
+    async sendQuotationMessage(
+        @Param('cartId') cartId: string,
+        @Request() req: { user: { id: string } },
+        @Body('content') content: string,
+    ) {
+        return this.ordersService.sendQuotationMessage(cartId, req.user.id, content);
     }
 
     @Get()

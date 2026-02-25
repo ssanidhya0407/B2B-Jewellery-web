@@ -309,11 +309,11 @@ export default function InventoryPage() {
         let csv = '';
         if (activeTab === 'inventory') {
             csv = 'SKU,Name,Category,Metal,Cost,MOQ,Stock,Active\n' +
-                sortedInv.map(i => `"${i.skuCode}","${i.name}","${i.category}","${i.primaryMetal || ''}",${Number(i.baseCost).toFixed(2)},${i.moq},${i.availableQuantity},${i.isActive}`).join('\n');
+                sortedInv.map(i => `"${i.skuCode}","${i.name}","${i.category}","${i.primaryMetal || ''}",₹${Number(i.baseCost).toFixed(2)},${i.moq},${i.availableQuantity},${i.isActive}`).join('\n');
         } else {
             const items = activeTab === 'manufacturer' ? sortedMfg : sortedAli;
             csv = 'Name,Category,Metal,CostMin,CostMax,MOQ,Tier,Verified\n' +
-                items.map(i => `"${i.name}","${i.category}","${i.primaryMetal || ''}",${Number(i.baseCostMin || 0).toFixed(2)},${Number(i.baseCostMax || 0).toFixed(2)},${i.moq},"${i.qualityTier}",${i.isVerified}`).join('\n');
+                items.map(i => `"${i.name}","${i.category}","${i.primaryMetal || ''}",₹${Number(i.baseCostMin || 0).toFixed(2)},₹${Number(i.baseCostMax || 0).toFixed(2)},${i.moq},"${i.qualityTier}",${i.isVerified}`).join('\n');
         }
         const blob = new Blob([csv], { type: 'text/csv' });
         const url = URL.createObjectURL(blob);
@@ -555,7 +555,7 @@ export default function InventoryPage() {
                                             </td>
                                             <td className="px-4 py-3"><span className="badge-secondary capitalize">{item.category}</span></td>
                                             <td className="px-4 py-3 text-primary-500">{item.primaryMetal || '—'}</td>
-                                            <td className="px-4 py-3 text-right font-medium text-primary-900">${Number(item.baseCost).toFixed(2)}</td>
+                                            <td className="px-4 py-3 text-right font-medium text-primary-900">₹${Number(item.baseCost).toFixed(2)}</td>
                                             <td className="px-4 py-3 text-right text-primary-600">{item.moq}</td>
                                             <td className="px-4 py-3 text-right"><span className={item.availableQuantity > 0 ? 'text-green-600 font-medium' : 'text-red-500'}>{item.availableQuantity}</span></td>
                                             <td className="px-4 py-3 text-center">
@@ -589,7 +589,7 @@ export default function InventoryPage() {
                                             <td className="px-4 py-3"><span className="badge-secondary capitalize">{item.category}</span></td>
                                             <td className="px-4 py-3 text-primary-500">{item.primaryMetal || '—'}</td>
                                             <td className="px-4 py-3 text-right font-medium text-primary-900">
-                                                {item.baseCostMin && item.baseCostMax ? `$${Number(item.baseCostMin).toFixed(0)} – $${Number(item.baseCostMax).toFixed(0)}` : '—'}
+                                                {item.baseCostMin && item.baseCostMax ? `₹${Number(item.baseCostMin).toFixed(0)} – ₹${Number(item.baseCostMax).toFixed(0)}` : '—'}
                                             </td>
                                             <td className="px-4 py-3 text-right text-primary-600">{item.moq}</td>
                                             <td className="px-4 py-3 text-center">
@@ -651,12 +651,12 @@ export default function InventoryPage() {
                                             <div className="flex justify-between"><span className="text-primary-400">Metal</span><span className="text-primary-700">{item.primaryMetal || '—'}</span></div>
                                             {isInv ? (
                                                 <>
-                                                    <div className="flex justify-between"><span className="text-primary-400">Base Cost</span><span className="font-medium text-primary-900">${Number(item.baseCost).toFixed(2)}</span></div>
+                                                    <div className="flex justify-between"><span className="text-primary-400">Base Cost</span><span className="font-medium text-primary-900">₹${Number(item.baseCost).toFixed(2)}</span></div>
                                                     <div className="flex justify-between"><span className="text-primary-400">MOQ / Stock</span><span className="text-primary-700">{item.moq} / <span className={item.availableQuantity > 0 ? 'text-green-600' : 'text-red-500'}>{item.availableQuantity}</span></span></div>
                                                 </>
                                             ) : (
                                                 <>
-                                                    <div className="flex justify-between"><span className="text-primary-400">Price Range</span><span className="font-medium text-primary-900">{item.baseCostMin && item.baseCostMax ? `$${Number(item.baseCostMin).toFixed(0)} – $${Number(item.baseCostMax).toFixed(0)}` : '—'}</span></div>
+                                                    <div className="flex justify-between"><span className="text-primary-400">Price Range</span><span className="font-medium text-primary-900">{item.baseCostMin && item.baseCostMax ? `₹${Number(item.baseCostMin).toFixed(0)} – ₹${Number(item.baseCostMax).toFixed(0)}` : '—'}</span></div>
                                                     <div className="flex justify-between"><span className="text-primary-400">MOQ / Tier</span><span className="text-primary-700">{item.moq} / <span className="capitalize">{item.qualityTier}</span></span></div>
                                                 </>
                                             )}
@@ -739,7 +739,7 @@ export default function InventoryPage() {
                                     </div>
                                     <div className="grid gap-4 md:grid-cols-3">
                                         <div>
-                                            <label className="block text-sm font-medium text-primary-700 mb-1.5">Base Cost ($) <span className="text-red-500">*</span></label>
+                                            <label className="block text-sm font-medium text-primary-700 mb-1.5">Base Cost (₹) <span className="text-red-500">*</span></label>
                                             <input type="number" step="0.01" min="0" className={`input ${formErrors.baseCost ? 'border-red-400' : ''}`} value={invForm.baseCost} onChange={e => setInvForm({ ...invForm, baseCost: e.target.value })} placeholder="0.00" />
                                             {formErrors.baseCost && <p className="text-xs text-red-500 mt-1">{formErrors.baseCost}</p>}
                                         </div>
@@ -826,11 +826,11 @@ export default function InventoryPage() {
                                     </div>
                                     <div className="grid gap-4 md:grid-cols-3">
                                         <div>
-                                            <label className="block text-sm font-medium text-primary-700 mb-1.5">Min Cost ($)</label>
+                                            <label className="block text-sm font-medium text-primary-700 mb-1.5">Min Cost (₹)</label>
                                             <input type="number" step="0.01" min="0" className="input" value={catForm.baseCostMin} onChange={e => setCatForm({ ...catForm, baseCostMin: e.target.value })} placeholder="0.00" />
                                         </div>
                                         <div>
-                                            <label className="block text-sm font-medium text-primary-700 mb-1.5">Max Cost ($)</label>
+                                            <label className="block text-sm font-medium text-primary-700 mb-1.5">Max Cost (₹)</label>
                                             <input type="number" step="0.01" min="0" className="input" value={catForm.baseCostMax} onChange={e => setCatForm({ ...catForm, baseCostMax: e.target.value })} placeholder="0.00" />
                                         </div>
                                         <div>
@@ -960,15 +960,15 @@ export default function InventoryPage() {
                                     <div className="grid grid-cols-2 gap-4">
                                         {activeTab === 'inventory' ? (
                                             <>
-                                                <DField label="Base Cost" value={`$${Number((detailItem as InventoryItem).baseCost).toFixed(2)}`} />
+                                                <DField label="Base Cost" value={`₹${Number((detailItem as InventoryItem).baseCost).toFixed(2)}`} />
                                                 <DField label="MOQ" value={`${detailItem.moq} units`} />
                                                 <DField label="Available Qty" value={String((detailItem as InventoryItem).availableQuantity)} />
                                                 <DField label="Lead Time" value={(detailItem as InventoryItem).leadTimeDays ? `${(detailItem as InventoryItem).leadTimeDays} days` : undefined} />
                                             </>
                                         ) : (
                                             <>
-                                                <DField label="Min Cost" value={(detailItem as CatalogItem).baseCostMin ? `$${Number((detailItem as CatalogItem).baseCostMin).toFixed(2)}` : undefined} />
-                                                <DField label="Max Cost" value={(detailItem as CatalogItem).baseCostMax ? `$${Number((detailItem as CatalogItem).baseCostMax).toFixed(2)}` : undefined} />
+                                                <DField label="Min Cost" value={(detailItem as CatalogItem).baseCostMin ? `₹${Number((detailItem as CatalogItem).baseCostMin).toFixed(2)}` : undefined} />
+                                                <DField label="Max Cost" value={(detailItem as CatalogItem).baseCostMax ? `₹${Number((detailItem as CatalogItem).baseCostMax).toFixed(2)}` : undefined} />
                                                 <DField label="MOQ" value={`${detailItem.moq} units`} />
                                                 <DField label="Lead Time" value={(detailItem as CatalogItem).leadTimeDays ? `${(detailItem as CatalogItem).leadTimeDays} days` : undefined} />
                                             </>

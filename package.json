@@ -7,7 +7,7 @@
         "packages/*"
     ],
     "scripts": {
-        "dev": "turbo dev --filter=@jewellery/web --filter=@jewellery/api --filter=@jewellery/database --filter=@jewellery/shared",
+        "dev": "turbo dev --filter=@jewellery/web --filter=@jewellery/dashboard --filter=@jewellery/api --filter=@jewellery/database --filter=@jewellery/shared",
         "build": "turbo build",
         "lint": "turbo lint",
         "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",

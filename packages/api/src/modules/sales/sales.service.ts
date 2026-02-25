@@ -3,39 +3,438 @@ import { PrismaService } from '../../database/prisma.service';
 
 @Injectable()
 export class SalesService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(private readonly prisma: PrismaService) { }
+
+    private async autoForwardOrderToOpsIfNeeded(orderId: string, actorId?: string | null) {
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: {
+                payments: true,
+                quotation: { select: { cartId: true } },
+            },
+        });
+        if (!order) throw new NotFoundException('Order not found');
+
+        const paymentConfirmedAt = this.inferPaymentConfirmedAt(order);
+        if (!paymentConfirmedAt) {
+            return { order, autoForwarded: false, alreadyForwarded: false };
+        }
+
+        const alreadyForwarded = Boolean(order.forwardedToOpsAt)
+            || ['confirmed', 'in_procurement', 'shipped', 'partially_shipped', 'delivered', 'partially_delivered'].includes(order.status);
+        if (alreadyForwarded) {
+            return { order, autoForwarded: false, alreadyForwarded: true };
+        }
+
+        const now = new Date();
+        const updated = await this.prisma.order.update({
+            where: { id: order.id },
+            data: {
+                status: 'confirmed',
+                forwardedToOpsAt: now,
+                forwardedToOpsById: actorId || order.salesPersonId || null,
+            },
+            include: {
+                quotation: { select: { cartId: true } },
+            },
+        });
+
+        const opsUsers = await this.prisma.user.findMany({
+            where: { userType: 'operations', isActive: true },
+            select: { id: true },
+        });
+
+        if (opsUsers.length > 0) {
+            await this.prisma.notification.createMany({
+                data: opsUsers.map((u) => ({
+                    userId: u.id,
+                    type: 'ops_fulfillment_ready',
+                    title: 'Order Ready for Processing',
+                    message: `Paid order #${updated.orderNumber} is ready for fulfillment.`,
+                    link: `/ops/orders`,
+                })),
+            });
+        }
+
+        if (updated.quotation?.cartId) {
+            await this.prisma.message.create({
+                data: {
+                    cartId: updated.quotation.cartId,
+                    senderId: actorId || order.salesPersonId || order.buyerId,
+                    content: '[System] FORWARDED_TO_OPS_FOR_FULFILLMENT',
+                },
+            }).catch(() => null);
+        }
+
+        return { order: updated, autoForwarded: true, alreadyForwarded: false };
+    }
+
+    private async getOwnedOrder(orderId: string, salesPersonId: string) {
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: {
+                quotation: { select: { id: true, cartId: true } },
+                payments: true,
+            },
+        });
+
+        if (!order) throw new NotFoundException('Order not found');
+        if (order.salesPersonId && order.salesPersonId !== salesPersonId) {
+            throw new BadRequestException('This order is not assigned to you');
+        }
+        return order;
+    }
+
+    private async getOwnedOrderByQuotation(quotationId: string, salesPersonId: string) {
+        const order = await this.prisma.order.findFirst({
+            where: { quotationId },
+            include: {
+                quotation: { select: { id: true, cartId: true } },
+                payments: true,
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+        if (!order) throw new NotFoundException('Order not found for this quotation');
+        if (order.salesPersonId && order.salesPersonId !== salesPersonId) {
+            throw new BadRequestException('This order is not assigned to you');
+        }
+        return order;
+    }
+
+    private inferPaymentConfirmedAt(order: {
+        paymentConfirmedAt: Date | null;
+        payments: Array<{ status: string; paidAt: Date | null; createdAt: Date }>;
+        paidAmount: number | { toString(): string } | null;
+        totalAmount: number | { toString(): string } | null;
+    }) {
+        if (order.paymentConfirmedAt) return order.paymentConfirmedAt;
+        const total = Number(order.totalAmount || 0);
+        const paid = Number(order.paidAmount || 0);
+        if (total > 0 && paid < total) return null;
+        const paidRecord = order.payments.find((p) => ['paid'].includes((p.status || '').toLowerCase()));
+        return paidRecord?.paidAt || paidRecord?.createdAt || null;
+    }
+
+    private inferOpsFinalCheckStatus(order: {
+        opsFinalCheckStatus?: string | null;
+        paymentLinkSentAt?: Date | null;
+        paymentConfirmedAt?: Date | null;
+        forwardedToOpsAt?: Date | null;
+    }) {
+        const explicit = (order.opsFinalCheckStatus || '').toLowerCase();
+        if (explicit === 'approved' || explicit === 'pending' || explicit === 'rejected') return explicit;
+        if (order.paymentLinkSentAt || order.paymentConfirmedAt || order.forwardedToOpsAt) return 'approved';
+        return 'pending';
+    }
+
+    private withInferredWorkflowMetadata<T extends {
+        status: string;
+        paidAmount: number | { toString(): string } | null;
+        totalAmount: number | { toString(): string } | null;
+        paymentLinkSentAt: Date | null;
+        paymentConfirmedAt: Date | null;
+        opsFinalCheckStatus?: string | null;
+        opsFinalCheckedAt?: Date | null;
+        opsFinalCheckedById?: string | null;
+        opsFinalCheckReason?: string | null;
+        forwardedToOpsAt: Date | null;
+        payments: Array<{ status: string; paidAt: Date | null; createdAt: Date }>;
+    }>(order: T | null) {
+        if (!order) return null;
+        const inferredConfirmed = this.inferPaymentConfirmedAt(order);
+        const inferredForwarded = order.forwardedToOpsAt
+            || (['confirmed', 'in_procurement', 'shipped', 'partially_shipped', 'delivered', 'partially_delivered'].includes(order.status)
+                ? new Date()
+                : null);
+        return {
+            ...order,
+            opsFinalCheckStatus: this.inferOpsFinalCheckStatus(order),
+            paymentConfirmedAt: order.paymentConfirmedAt || inferredConfirmed,
+            forwardedToOpsAt: inferredForwarded,
+        };
+    }
+
+    async createOrderPaymentLink(orderId: string, salesPersonId: string) {
+        const order = await this.getOwnedOrder(orderId, salesPersonId);
+        if (this.inferOpsFinalCheckStatus(order) !== 'approved') {
+            throw new BadRequestException('Ops final check must be approved before sending payment link');
+        }
+        if ((order.opsFinalCheckStatus || '').toLowerCase() === 'rejected') {
+            throw new BadRequestException('Cannot send payment link for a rejected request');
+        }
+        const now = new Date();
+        const updated = await this.prisma.order.update({
+            where: { id: order.id },
+            data: {
+                paymentLinkSentAt: now,
+                paymentLinkSentById: salesPersonId,
+                paymentLinkChannel: 'sales_portal',
+            },
+        });
+
+        await this.prisma.notification.create({
+            data: {
+                userId: updated.buyerId,
+                type: 'payment_link_sent',
+                title: 'Payment Link Sent',
+                message: `Payment link has been shared for order #${updated.orderNumber}.`,
+                link: '/app/orders',
+            },
+        });
+
+        return {
+            success: true,
+            orderId: updated.id,
+            paymentLinkSentAt: updated.paymentLinkSentAt,
+        };
+    }
+
+    async resendOrderPaymentLink(orderId: string, salesPersonId: string) {
+        return this.createOrderPaymentLink(orderId, salesPersonId);
+    }
+
+    async createQuotationPaymentLink(quotationId: string, salesPersonId: string) {
+        const order = await this.getOwnedOrderByQuotation(quotationId, salesPersonId);
+        return this.createOrderPaymentLink(order.id, salesPersonId);
+    }
+
+    async resendQuotationPaymentLink(quotationId: string, salesPersonId: string) {
+        const order = await this.getOwnedOrderByQuotation(quotationId, salesPersonId);
+        return this.resendOrderPaymentLink(order.id, salesPersonId);
+    }
+
+    async getOrderPaymentStatus(orderId: string, salesPersonId: string) {
+        const order = await this.getOwnedOrder(orderId, salesPersonId);
+        const paymentConfirmedAt = this.inferPaymentConfirmedAt(order);
+        const isPaymentConfirmed = Boolean(paymentConfirmedAt);
+        const isLinkSent = Boolean(order.paymentLinkSentAt);
+        const isForwardedToOps = Boolean(order.forwardedToOpsAt) || ['confirmed', 'in_procurement', 'shipped', 'partially_shipped', 'delivered', 'partially_delivered'].includes(order.status);
+        const opsFinalCheckStatus = this.inferOpsFinalCheckStatus(order);
+
+        return {
+            orderId: order.id,
+            orderStatus: order.status,
+            opsFinalCheckStatus,
+            opsFinalCheckedAt: order.opsFinalCheckedAt,
+            opsFinalCheckedById: order.opsFinalCheckedById,
+            opsFinalCheckReason: order.opsFinalCheckReason,
+            paymentLinkSentAt: order.paymentLinkSentAt,
+            paymentLinkSentById: order.paymentLinkSentById,
+            paymentLinkChannel: order.paymentLinkChannel,
+            paymentConfirmedAt,
+            paymentConfirmedById: order.paymentConfirmedById,
+            paymentConfirmationSource: order.paymentConfirmationSource,
+            forwardedToOpsAt: order.forwardedToOpsAt,
+            forwardedToOpsById: order.forwardedToOpsById,
+            isLinkSent,
+            isPaymentConfirmed,
+            isForwardedToOps,
+        };
+    }
+
+    async getQuotationPaymentStatus(quotationId: string, salesPersonId: string) {
+        const order = await this.getOwnedOrderByQuotation(quotationId, salesPersonId);
+        return this.getOrderPaymentStatus(order.id, salesPersonId);
+    }
+
+    async confirmOrderPayment(
+        orderId: string,
+        salesPersonId: string,
+        payload?: { source?: string; reference?: string },
+    ) {
+        const order = await this.getOwnedOrder(orderId, salesPersonId);
+        if (this.inferOpsFinalCheckStatus(order) !== 'approved') {
+            throw new BadRequestException('Ops final check must be approved before confirming payment');
+        }
+        const paymentConfirmedAt = this.inferPaymentConfirmedAt(order);
+        if (paymentConfirmedAt) {
+            const forwarded = await this.autoForwardOrderToOpsIfNeeded(order.id, salesPersonId);
+            return {
+                success: true,
+                orderId: order.id,
+                paymentConfirmedAt,
+                alreadyConfirmed: true,
+                autoForwardedToOps: forwarded.autoForwarded,
+                forwardedToOpsAt: forwarded.order.forwardedToOpsAt || null,
+            };
+        }
+
+        const now = new Date();
+        const updated = await this.prisma.order.update({
+            where: { id: order.id },
+            data: {
+                paymentConfirmedAt: now,
+                paymentConfirmedById: salesPersonId,
+                paymentConfirmationSource: payload?.source || 'manual_reconciliation',
+            },
+        });
+        const forwarded = await this.autoForwardOrderToOpsIfNeeded(updated.id, salesPersonId);
+
+        return {
+            success: true,
+            orderId: updated.id,
+            paymentConfirmedAt: updated.paymentConfirmedAt,
+            paymentConfirmationSource: updated.paymentConfirmationSource,
+            autoForwardedToOps: forwarded.autoForwarded,
+            forwardedToOpsAt: forwarded.order.forwardedToOpsAt || null,
+        };
+    }
+
+    async confirmQuotationPayment(
+        quotationId: string,
+        salesPersonId: string,
+        payload?: { source?: string; reference?: string },
+    ) {
+        const order = await this.getOwnedOrderByQuotation(quotationId, salesPersonId);
+        return this.confirmOrderPayment(order.id, salesPersonId, payload);
+    }
+
+    async forwardPaidOrderToOps(orderId: string, salesPersonId: string) {
+        const owned = await this.getOwnedOrder(orderId, salesPersonId);
+        if (this.inferOpsFinalCheckStatus(owned) !== 'approved') {
+            throw new BadRequestException('Ops final check must be approved before forwarding to Ops');
+        }
+        const paymentConfirmedAt = this.inferPaymentConfirmedAt(owned);
+        if (!paymentConfirmedAt) throw new BadRequestException('Payment must be confirmed before forwarding to Ops');
+        const forwarded = await this.autoForwardOrderToOpsIfNeeded(orderId, salesPersonId);
+        return {
+            success: true,
+            orderId,
+            status: forwarded.order.status,
+            forwardedToOpsAt: forwarded.order.forwardedToOpsAt || null,
+            alreadyForwarded: forwarded.alreadyForwarded,
+        };
+    }
 
     // ─── Dashboard Metrics ───
 
     async getDashboardMetrics(salesPersonId: string) {
+        const now = new Date();
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
         const [
             assignedRequests,
-            pendingQuotes,
+            draftQuotes,
+            sentQuotes,
             activeNegotiations,
-            totalCommission,
+            totalCommissionAgg,
+            mtdCommissionAgg,
+            pipelineData,
+            orderCount,
+            recentAssignedCarts,
+            recentCommissions,
         ] = await Promise.all([
             this.prisma.intendedCart.count({
-                where: { status: { in: ['submitted', 'under_review'] } },
+                where: { assignedSalesId: salesPersonId, status: { in: ['submitted', 'under_review'] } },
             }),
             this.prisma.quotation.count({
-                where: { createdById: salesPersonId, status: { in: ['draft', 'sent'] } },
+                where: { createdById: salesPersonId, status: 'draft' },
+            }),
+            this.prisma.quotation.count({
+                where: { createdById: salesPersonId, status: { in: ['sent', 'countered', 'negotiating', 'rejected'] } },
             }),
             this.prisma.intendedCart.count({
-                where: { status: 'quoted' },
+                where: { assignedSalesId: salesPersonId, status: 'quoted' },
             }),
-            this.prisma.commission.aggregate({
-                where: { salesPersonId, status: 'paid' },
-                _sum: { commissionAmount: true },
+            this.prisma.commissionRecord.aggregate({
+                where: { salesPersonId, status: { in: ['paid', 'pending'] } },
+                _sum: { amount: true },
+            }),
+            this.prisma.commissionRecord.aggregate({
+                where: { salesPersonId, status: { in: ['paid', 'pending'] }, createdAt: { gte: startOfMonth } },
+                _sum: { amount: true },
+            }),
+            this.prisma.intendedCart.groupBy({
+                by: ['status'],
+                where: { assignedSalesId: salesPersonId },
+                _count: true,
+            }),
+            this.prisma.order.count({
+                where: { salesPersonId },
+            }),
+            // Fetch 5 most recent requests for a quick action table
+            this.prisma.intendedCart.findMany({
+                where: { assignedSalesId: salesPersonId, status: { in: ['submitted', 'under_review', 'quoted'] } },
+                orderBy: { updatedAt: 'desc' },
+                take: 5,
+                include: {
+                    user: { select: { email: true, firstName: true, lastName: true } },
+                    quotations: {
+                        orderBy: { createdAt: 'desc' },
+                        take: 1,
+                        select: { status: true }
+                    }
+                }
+            }),
+            this.prisma.commissionRecord.findMany({
+                where: { salesPersonId },
+                orderBy: { createdAt: 'desc' },
+                take: 5,
+                include: { order: { select: { orderNumber: true } } }
             }),
         ]);
 
+        // Transform pipeline data for UI strictly from DB
+        const pipeline = {
+            leads: 0,
+            validated: 0,
+            quoted: 0,
+            ordered: orderCount,
+        };
+
+        pipelineData.forEach(item => {
+            if (item.status === 'submitted') pipeline.leads += item._count;
+            if (item.status === 'under_review') pipeline.validated += item._count;
+            if (item.status === 'quoted') pipeline.quoted += item._count;
+        });
+
+        const totalEarned = Number(totalCommissionAgg._sum.amount || 0);
+        const mtdEarned = Number(mtdCommissionAgg._sum.amount || 0);
+
+        // Precise conversions based on lifetime assignments (simplistic but exact mathematically for this view)
+        const totalLeads = pipeline.leads + pipeline.validated + pipeline.quoted + pipeline.ordered;
+        const totalQuotesHit = pipeline.quoted + pipeline.ordered;
+
         return {
             assignedRequests,
-            pendingQuotes,
+            draftQuotes,
+            sentQuotes,
             activeNegotiations,
-            totalCommission: Number(totalCommission._sum.commissionAmount || 0),
+            earnings: {
+                total: totalEarned,
+                mtd: mtdEarned,
+            },
+            pipeline,
+            conversions: {
+                leadsToQuotes: totalLeads > 0 ? Math.round((totalQuotesHit / totalLeads) * 100) : 0,
+                quotesToOrders: totalQuotesHit > 0 ? Math.round((pipeline.ordered / totalQuotesHit) * 100) : 0,
+            },
+            recentActivity: {
+                requests: recentAssignedCarts.map(cart => {
+                    const latestQuote = cart.quotations?.[0];
+                    const displayStatus = latestQuote?.status === 'countered'
+                        ? 'countered'
+                        : latestQuote?.status === 'negotiating' || latestQuote?.status === 'sent'
+                            ? 'quoted'
+                            : cart.status;
+                    return {
+                        id: cart.id,
+                        buyer: [cart.user.firstName, cart.user.lastName].filter(Boolean).join(' ') || cart.user.email,
+                        status: displayStatus,
+                        updatedAt: cart.updatedAt,
+                    };
+                }),
+                commissions: recentCommissions.map(comm => ({
+                    id: comm.id,
+                    orderNumber: comm.order?.orderNumber || 'Unknown',
+                    amount: Number(comm.amount),
+                    status: comm.status,
+                    date: comm.createdAt,
+                })),
+            }
         };
     }
+
 
     // ─── Quote Request Details ───
 
@@ -89,7 +488,16 @@ export class SalesService {
         });
 
         if (!cart) throw new NotFoundException('Request not found');
-        return cart;
+        const latestOrder = await this.prisma.order.findFirst({
+            where: { quotation: { cartId } },
+            include: { payments: true },
+            orderBy: { createdAt: 'desc' },
+        });
+
+        return {
+            ...cart,
+            order: this.withInferredWorkflowMetadata(latestOrder),
+        };
     }
 
     // ─── Quote Preparation (Check Stock & Apply Markup) ───
@@ -332,6 +740,14 @@ export class SalesService {
             data: { status: 'closed' },
         });
 
+        // Auto-calculate commission (Pending) when order is created
+        // This ensures consistency between order counts and commission records on the dashboard
+        try {
+            await this.calculateCommission(order.id);
+        } catch (e: any) {
+            console.error('Initial commission calculation failed:', e?.message);
+        }
+
         return order;
     }
 
@@ -359,7 +775,7 @@ export class SalesService {
     // ─── Commission Report ───
 
     async getCommissionReport(salesPersonId: string) {
-        const commissions = await this.prisma.commission.findMany({
+        const commissions = await this.prisma.commissionRecord.findMany({
             where: { salesPersonId },
             include: {
                 order: { select: { orderNumber: true, totalAmount: true, status: true } },
@@ -367,13 +783,91 @@ export class SalesService {
             orderBy: { createdAt: 'desc' },
         });
 
-        const summary = await this.prisma.commission.groupBy({
+        const summary = await this.prisma.commissionRecord.groupBy({
             by: ['status'],
             where: { salesPersonId },
-            _sum: { commissionAmount: true },
+            _sum: { amount: true },
         });
 
         return { commissions, summary };
+    }
+
+    async getCommissionStructure() {
+        const rows = await this.prisma.commissionStructure.findMany({
+            where: { isActive: true },
+            orderBy: { createdAt: 'desc' },
+        });
+        const pick = (name: string, fallback: number) => {
+            const row = rows.find((r) => r.name === name);
+            const value = row ? Number(row.value) : NaN;
+            return Number.isFinite(value) ? value : fallback;
+        };
+        return {
+            baseRate: pick('baseRate', 4),
+            highValueRate: pick('highValueRate', 5),
+            highValueThreshold: pick('highValueThreshold', 500000),
+            paidBonusRate: pick('paidBonusRate', 0.5),
+        };
+    }
+
+    async saveCommissionStructure(data: {
+        baseRate: number;
+        highValueRate: number;
+        highValueThreshold: number;
+        paidBonusRate: number;
+    }) {
+        const normalized = {
+            baseRate: Math.max(0, Number(data.baseRate || 0)),
+            highValueRate: Math.max(0, Number(data.highValueRate || 0)),
+            highValueThreshold: Math.max(0, Number(data.highValueThreshold || 0)),
+            paidBonusRate: Math.max(0, Number(data.paidBonusRate || 0)),
+        };
+
+        await this.prisma.$transaction(async (tx) => {
+            const entries: Array<{ name: string; type: string; value: number }> = [
+                { name: 'baseRate', type: 'percentage', value: normalized.baseRate },
+                { name: 'highValueRate', type: 'percentage', value: normalized.highValueRate },
+                { name: 'highValueThreshold', type: 'fixed', value: normalized.highValueThreshold },
+                { name: 'paidBonusRate', type: 'percentage', value: normalized.paidBonusRate },
+            ];
+            for (const entry of entries) {
+                const latest = await tx.commissionStructure.findFirst({
+                    where: { name: entry.name },
+                    orderBy: { updatedAt: 'desc' },
+                });
+                if (latest) {
+                    await tx.commissionStructure.update({
+                        where: { id: latest.id },
+                        data: {
+                            type: entry.type,
+                            value: entry.value,
+                            baseRate: entry.value,
+                            thresholdAmount: entry.name === 'highValueThreshold' ? entry.value : null,
+                            acceleratedRate: entry.name === 'highValueRate' ? entry.value : null,
+                            isActive: true,
+                        },
+                    });
+                    await tx.commissionStructure.updateMany({
+                        where: { name: entry.name, id: { not: latest.id } },
+                        data: { isActive: false },
+                    });
+                } else {
+                    await tx.commissionStructure.create({
+                        data: {
+                            name: entry.name,
+                            type: entry.type,
+                            value: entry.value,
+                            baseRate: entry.value,
+                            thresholdAmount: entry.name === 'highValueThreshold' ? entry.value : null,
+                            acceleratedRate: entry.name === 'highValueRate' ? entry.value : null,
+                            isActive: true,
+                        },
+                    });
+                }
+            }
+        });
+
+        return this.getCommissionStructure();
     }
 
     // ─── Buyer Onboarding ───
@@ -394,6 +888,74 @@ export class SalesService {
             },
             orderBy: { createdAt: 'desc' },
         });
+    }
+
+    async getBuyerRequests(salesPersonId: string, buyerId: string) {
+        const carts = await this.prisma.intendedCart.findMany({
+            where: {
+                userId: buyerId,
+            },
+            include: {
+                user: {
+                    select: {
+                        id: true,
+                        email: true,
+                        companyName: true,
+                        firstName: true,
+                        lastName: true,
+                        phone: true,
+                    },
+                },
+                items: {
+                    select: { id: true },
+                },
+                quotations: {
+                    select: {
+                        id: true,
+                        status: true,
+                        createdAt: true,
+                        sentAt: true,
+                        quotedTotal: true,
+                    },
+                    orderBy: { createdAt: 'desc' },
+                },
+                assignedSales: {
+                    select: { id: true },
+                },
+            },
+            orderBy: { submittedAt: 'desc' },
+        });
+
+        const cartIds = carts.map((c) => c.id);
+        const orders = cartIds.length > 0
+            ? await this.prisma.order.findMany({
+                where: { quotation: { cartId: { in: cartIds } } },
+                include: {
+                    payments: true,
+                    quotation: { select: { cartId: true } },
+                },
+                orderBy: { createdAt: 'desc' },
+            })
+            : [];
+
+        const latestOrderByCart = new Map<string, (typeof orders)[number]>();
+        for (const order of orders) {
+            const orderCartId = order.quotation?.cartId;
+            if (!orderCartId || latestOrderByCart.has(orderCartId)) continue;
+            latestOrderByCart.set(orderCartId, order);
+        }
+
+        return carts
+            .filter((cart) => {
+                // Sales can view carts assigned to them, and carts not yet assigned.
+                // This preserves visibility for full buyer lifecycle while avoiding cross-owner leakage.
+                if (!cart.assignedSales?.id) return true;
+                return cart.assignedSales.id === salesPersonId;
+            })
+            .map((cart) => ({
+                ...cart,
+                order: this.withInferredWorkflowMetadata(latestOrderByCart.get(cart.id) || null),
+            }));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -471,18 +1033,14 @@ export class SalesService {
             include: {
                 salesPerson: true,
                 items: true,
-                commissions: true,
+                commissionRecords: true,
+                payments: true,
             },
         });
 
         if (!order) throw new NotFoundException('Order not found');
         if (!order.salesPersonId || !order.salesPerson) {
             return { message: 'No sales person assigned to this order' };
-        }
-
-        // Don't double-calculate
-        if (order.commissions.length > 0) {
-            return { message: 'Commission already calculated', commissions: order.commissions };
         }
 
         // Calculate delivered value
@@ -496,20 +1054,47 @@ export class SalesService {
             : Number(order.deliveredAmount) > 0
                 ? Number(order.deliveredAmount)
                 : Number(order.totalAmount);
+        const structureConfig = await this.getActiveCommissionConfig();
+        const baseRate = structureConfig.baseRate ?? Number(order.salesPerson.commissionRate || 5);
+        const highValueRate = structureConfig.highValueRate ?? baseRate;
+        const threshold = structureConfig.highValueThreshold ?? 500000;
+        const paidBonusRate = structureConfig.paidBonusRate ?? 0;
 
-        const commissionRate = Number(order.salesPerson.commissionRate || 5);
-        const commissionAmount = valueForCommission * (commissionRate / 100);
+        const selectedRate = valueForCommission >= threshold ? highValueRate : baseRate;
+        const isPaid = Boolean(this.inferPaymentConfirmedAt({
+            paymentConfirmedAt: order.paymentConfirmedAt,
+            payments: order.payments.map((p) => ({
+                status: p.status,
+                paidAt: p.paidAt,
+                createdAt: p.createdAt,
+            })),
+            paidAmount: order.paidAmount,
+            totalAmount: order.totalAmount,
+        }));
+        const effectiveRate = selectedRate + (isPaid ? paidBonusRate : 0);
+        const commissionAmount = valueForCommission * (effectiveRate / 100);
 
-        const commission = await this.prisma.commission.create({
-            data: {
-                orderId,
-                salesPersonId: order.salesPersonId,
-                commissionRate,
-                deliveredValue: valueForCommission,
-                commissionAmount,
-                status: 'pending',
-            },
-        });
+        const commission = order.commissionRecords?.[0]
+            ? await this.prisma.commissionRecord.update({
+                where: { id: order.commissionRecords[0].id },
+                data: {
+                    commissionRate: effectiveRate,
+                    deliveredValue: valueForCommission,
+                    amount: commissionAmount,
+                    status: isPaid ? 'paid' : 'pending',
+                    calculatedAt: new Date(),
+                },
+            })
+            : await this.prisma.commissionRecord.create({
+                data: {
+                    orderId,
+                    salesPersonId: order.salesPersonId,
+                    commissionRate: effectiveRate,
+                    deliveredValue: valueForCommission,
+                    amount: commissionAmount,
+                    status: isPaid ? 'paid' : 'pending',
+                },
+            });
 
         // Notify sales person
         await this.prisma.notification.create({
@@ -525,15 +1110,32 @@ export class SalesService {
         return commission;
     }
 
+    private async getActiveCommissionConfig() {
+        const activeRows = await this.prisma.commissionStructure.findMany({
+            where: { isActive: true },
+            orderBy: { createdAt: 'desc' },
+        });
+        const pick = (name: string) => {
+            const row = activeRows.find((r) => r.name === name);
+            return row ? Number(row.value) : null;
+        };
+        return {
+            baseRate: pick('baseRate'),
+            highValueRate: pick('highValueRate'),
+            highValueThreshold: pick('highValueThreshold'),
+            paidBonusRate: pick('paidBonusRate'),
+        };
+    }
+
     /**
      * Get assigned requests for this sales person
      * (carts that have been validated and forwarded by ops).
      */
     async getAssignedRequests(salesPersonId: string) {
-        return this.prisma.intendedCart.findMany({
+        const carts = await this.prisma.intendedCart.findMany({
             where: {
                 assignedSalesId: salesPersonId,
-                status: { in: ['under_review', 'quoted'] },
+                status: { not: 'draft' },
             },
             include: {
                 user: {
@@ -575,6 +1177,30 @@ export class SalesService {
             },
             orderBy: { assignedAt: 'desc' },
         });
+
+        const cartIds = carts.map((c) => c.id);
+        const orders = cartIds.length > 0
+            ? await this.prisma.order.findMany({
+                where: { quotation: { cartId: { in: cartIds } } },
+                include: {
+                    payments: true,
+                    quotation: { select: { cartId: true } },
+                },
+                orderBy: { createdAt: 'desc' },
+            })
+            : [];
+
+        const latestOrderByCart = new Map<string, (typeof orders)[number]>();
+        for (const order of orders) {
+            const orderCartId = order.quotation?.cartId;
+            if (!orderCartId || latestOrderByCart.has(orderCartId)) continue;
+            latestOrderByCart.set(orderCartId, order);
+        }
+
+        return carts.map((cart) => ({
+            ...cart,
+            order: this.withInferredWorkflowMetadata(latestOrderByCart.get(cart.id) || null),
+        }));
     }
 
     /**
@@ -621,7 +1247,7 @@ export class SalesService {
                                 payments: true,
                                 shipments: true,
                                 procurement: { include: { supplier: true } },
-                                commissions: true,
+                                commissionRecords: true,
                             },
                         },
                     },
@@ -694,6 +1320,11 @@ export class SalesService {
 
         // Quotation phases
         const latestQuotation = cart.quotations[0];
+        const quotationWithLatestOrder = cart.quotations
+            .flatMap((q) => q.orders.map((o) => ({ quotation: q, order: o })))
+            .sort((a, b) => new Date(b.order.createdAt).getTime() - new Date(a.order.createdAt).getTime())[0];
+        const latestOrder = quotationWithLatestOrder?.order || null;
+        const acceptedQuotationForOrder = quotationWithLatestOrder?.quotation || null;
         if (latestQuotation) {
             // Phase 3: Draft
             timeline.push({
@@ -742,12 +1373,12 @@ export class SalesService {
             }
 
             // Phase 6: Accepted + Order
-            if (latestQuotation.status === 'accepted') {
+            if (latestQuotation.status === 'accepted' || acceptedQuotationForOrder?.status === 'accepted') {
                 timeline.push({
                     phase: 6,
                     label: 'Quotation Accepted',
                     status: 'completed',
-                    timestamp: latestQuotation.updatedAt,
+                    timestamp: acceptedQuotationForOrder?.updatedAt || latestQuotation.updatedAt,
                     actor: 'buyer',
                 });
             }
@@ -773,8 +1404,52 @@ export class SalesService {
             }
 
             // Order phases
-            const order = latestQuotation.orders[0];
+            const order = latestOrder;
             if (order) {
+                const opsFinalCheckStatus = this.inferOpsFinalCheckStatus(order);
+                if (opsFinalCheckStatus === 'pending') {
+                    timeline.push({
+                        phase: 6.1,
+                        label: 'Ops Final Check Pending',
+                        status: 'active',
+                        timestamp: order.createdAt,
+                        actor: 'operations',
+                    });
+                }
+
+                if (opsFinalCheckStatus === 'approved' && order.opsFinalCheckedAt) {
+                    timeline.push({
+                        phase: 6.2,
+                        label: 'Ops Final Check Approved',
+                        status: 'completed',
+                        timestamp: order.opsFinalCheckedAt,
+                        actor: 'operations',
+                    });
+                }
+
+                if (opsFinalCheckStatus === 'rejected') {
+                    timeline.push({
+                        phase: 6.2,
+                        label: 'Ops Final Check Rejected',
+                        status: 'rejected',
+                        timestamp: order.opsFinalCheckedAt || order.updatedAt,
+                        actor: 'operations',
+                        details: {
+                            reason: order.opsFinalCheckReason || 'No reason provided',
+                        },
+                    });
+                }
+
+                if (order.paymentLinkSentAt) {
+                    timeline.push({
+                        phase: 6.4,
+                        label: 'Payment Link Sent',
+                        status: 'completed',
+                        timestamp: order.paymentLinkSentAt,
+                        actor: 'sales',
+                    });
+                }
+
                 // Payment
                 const paidPayments = order.payments.filter(p => p.status === 'paid');
                 if (paidPayments.length > 0) {
@@ -789,6 +1464,29 @@ export class SalesService {
                             totalAmount: Number(order.totalAmount),
                             method: paidPayments[0].method,
                         },
+                    });
+                }
+
+                if (order.paymentConfirmedAt && paidPayments.length === 0) {
+                    timeline.push({
+                        phase: 6.6,
+                        label: 'Payment Confirmed',
+                        status: 'completed',
+                        timestamp: order.paymentConfirmedAt,
+                        actor: 'sales',
+                        details: {
+                            source: order.paymentConfirmationSource || 'manual_reconciliation',
+                        },
+                    });
+                }
+
+                if (order.forwardedToOpsAt) {
+                    timeline.push({
+                        phase: 6.7,
+                        label: 'Forwarded to Ops for Fulfillment',
+                        status: 'completed',
+                        timestamp: order.forwardedToOpsAt,
+                        actor: 'sales',
                     });
                 }
 
@@ -848,16 +1546,16 @@ export class SalesService {
                 }
 
                 // Commission
-                if (order.commissions.length > 0) {
+                if (order.commissionRecords && order.commissionRecords.length > 0) {
                     timeline.push({
                         phase: 9.5,
                         label: 'Commission Calculated',
                         status: 'completed',
-                        timestamp: order.commissions[0].createdAt,
+                        timestamp: order.commissionRecords[0].createdAt,
                         actor: 'system',
                         details: {
-                            amount: Number(order.commissions[0].commissionAmount),
-                            rate: Number(order.commissions[0].commissionRate),
+                            amount: Number(order.commissionRecords[0].amount),
+                            rate: Number(order.commissionRecords[0].commissionRate),
                         },
                     });
                 }
@@ -895,14 +1593,23 @@ export class SalesService {
                 sentAt: latestQuotation.sentAt,
                 items: latestQuotation.items,
                 negotiation: latestQuotation.negotiation,
-                order: latestQuotation.orders[0] || null,
+                // Important: bind the latest order in the thread, not only on the newest quotation row.
+                // A newer revision may exist after acceptance, while payment/fulfillment belongs to an older accepted quote.
+                order: latestOrder || null,
             } : null,
-            timeline: timeline.sort((a, b) => {
+            timeline: [...timeline, ...cart.messages.filter(m => m.content.includes('[System]')).map(m => ({
+                phase: 4.1,
+                label: 'Prices Adjusted',
+                status: 'completed',
+                timestamp: m.createdAt,
+                actor: 'system',
+                details: { update: m.content.replace('[System] ', '') }
+            }))].sort((a, b) => {
                 if (!a.timestamp) return 1;
                 if (!b.timestamp) return 1;
                 return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
             }),
-            messages: cart.messages,
+            messages: cart.messages.filter(m => !m.content.includes('[System]')),
         };
     }
 }

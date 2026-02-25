@@ -4,6 +4,9 @@ import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import Link from 'next/link';
 import QuotationTracker from '@/components/QuotationTracker';
+import { deriveCanonicalWorkflowStatus, type CanonicalWorkflowStatus } from '@/lib/workflow';
+import { canonicalStatusBadgeClass, canonicalStatusDisplayLabel } from '@/lib/workflow-ui';
+import { startStripeCheckout, verifyStripeSession } from '@/lib/stripe-checkout';
 
 interface OrderItem {
     id: string;
@@ -12,6 +15,14 @@ interface OrderItem {
     totalPrice: string | number;
     source: string;
     inventoryItem?: { name: string; imageUrl?: string; skuCode?: string };
+    quotationItem?: {
+        cartItem?: {
+            recommendationItem?: {
+                inventorySku?: { name: string; imageUrl?: string; skuCode?: string };
+                manufacturerItem?: { name: string; imageUrl?: string; modelNumber?: string };
+            };
+        };
+    };
 }
 
 interface Payment {
@@ -19,6 +30,7 @@ interface Payment {
     amount: string | number;
     method: string;
     status: string;
+    gatewayRef?: string;
     paidAt?: string;
     createdAt: string;
 }
@@ -37,6 +49,12 @@ interface Order {
     totalAmount: string | number;
     paidAmount: string | number;
     createdAt: string;
+    paymentLinkSentAt?: string | null;
+    opsFinalCheckStatus?: string | null;
+    opsFinalCheckedAt?: string | null;
+    opsFinalCheckReason?: string | null;
+    paymentConfirmedAt?: string | null;
+    forwardedToOpsAt?: string | null;
     cartId?: string;
     quotation?: { id: string; cartId?: string };
     items: OrderItem[];
@@ -54,6 +72,7 @@ export default function BuyerOrdersPage() {
     const [payAmount, setPayAmount] = useState('');
     const [payRef, setPayRef] = useState('');
     const [paying, setPaying] = useState(false);
+    const [paymentNoticeByOrderId, setPaymentNoticeByOrderId] = useState<Record<string, string>>({});
     const [trackerOrderId, setTrackerOrderId] = useState<string | null>(null);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const [trackerData, setTrackerData] = useState<Record<string, any> | null>(null);
@@ -72,6 +91,58 @@ export default function BuyerOrdersPage() {
 
     useEffect(() => { fetchOrders(); }, []);
 
+    useEffect(() => {
+        const runStripeReconcile = async () => {
+            const params = new URLSearchParams(window.location.search);
+            const sessionId = params.get('stripe_session_id');
+            const orderId = params.get('stripe_order_id');
+            if (!sessionId || !orderId) return;
+
+            const marker = `stripe_reconciled_${sessionId}`;
+            if (localStorage.getItem(marker)) {
+                window.history.replaceState({}, '', '/app/orders');
+                return;
+            }
+
+            try {
+                const verified = await verifyStripeSession(sessionId);
+                if (verified.paid) {
+                    await api.initiatePayment(orderId, {
+                        method: 'card',
+                        amount: Number(verified.amount || 0),
+                        transactionRef: verified.paymentIntentId || verified.sessionId,
+                    });
+                    localStorage.setItem(marker, '1');
+                    setPaymentNoticeByOrderId((prev) => ({ ...prev, [orderId]: 'Stripe payment received. Status updated.' }));
+                    await fetchOrders();
+                }
+            } catch {
+                // If verification endpoint fails but payment is already recorded, show success state.
+                try {
+                    const latest = await api.getOrder(orderId) as Order;
+                    const total = Number(latest.totalAmount || 0);
+                    const paid = Number(latest.paidAmount || 0);
+                    const paidSignal =
+                        Boolean(latest.paymentConfirmedAt) ||
+                        latest.payments?.some((p) => ['paid', 'completed'].includes(String(p.status || '').toLowerCase())) ||
+                        (total > 0 && paid >= total);
+                    if (paidSignal) {
+                        localStorage.setItem(marker, '1');
+                        setPaymentNoticeByOrderId((prev) => ({ ...prev, [orderId]: 'Stripe payment received. Status updated.' }));
+                        await fetchOrders();
+                    } else {
+                        setPaymentNoticeByOrderId((prev) => ({ ...prev, [orderId]: 'Stripe payment verification failed. Please retry.' }));
+                    }
+                } catch {
+                    setPaymentNoticeByOrderId((prev) => ({ ...prev, [orderId]: 'Stripe payment verification failed. Please retry.' }));
+                }
+            } finally {
+                window.history.replaceState({}, '', '/app/orders');
+            }
+        };
+        runStripeReconcile();
+    }, []);
+
     const toggleTracker = async (order: Order) => {
         if (trackerOrderId === order.id) { setTrackerOrderId(null); setTrackerData(null); return; }
         const cid = order.cartId || order.quotation?.cartId;
@@ -89,12 +160,33 @@ export default function BuyerOrdersPage() {
     const handlePayment = async (orderId: string) => {
         if (!payAmount || Number(payAmount) <= 0) return;
         setPaying(true);
+        setPaymentNoticeByOrderId((prev) => ({ ...prev, [orderId]: '' }));
         try {
-            await api.initiatePayment(orderId, {
+            if (payMethod === 'card') {
+                const origin = window.location.origin;
+                const successUrl = `${origin}/app/orders?stripe_session_id={CHECKOUT_SESSION_ID}&stripe_order_id=${encodeURIComponent(orderId)}`;
+                const cancelUrl = `${origin}/app/orders`;
+                await startStripeCheckout({
+                    orderId,
+                    amount: Number(payAmount),
+                    successUrl,
+                    cancelUrl,
+                });
+                return;
+            }
+            const result = await api.initiatePayment(orderId, {
                 method: payMethod,
                 amount: Number(payAmount),
                 transactionRef: payRef || undefined,
             });
+            const status = String((result as { status?: string } | null)?.status || '').toLowerCase();
+            const paidFromBuyer = Boolean((result as { paid?: boolean } | null)?.paid) || ['paid', 'completed', 'success'].includes(status);
+            if (payMethod !== 'bank_transfer' && paidFromBuyer) {
+                // Backend is authoritative; immediate refetch reflects paid status.
+                setPaymentNoticeByOrderId((prev) => ({ ...prev, [orderId]: 'Payment received. Status updated.' }));
+            } else if (payMethod === 'bank_transfer') {
+                setPaymentNoticeByOrderId((prev) => ({ ...prev, [orderId]: 'Bank transfer submitted. Awaiting Sales confirmation.' }));
+            }
             setPaymentModal(null);
             setPayAmount('');
             setPayRef('');
@@ -106,36 +198,73 @@ export default function BuyerOrdersPage() {
         }
     };
 
-    const getStatusStyle = (status: string) => {
-        const styles: Record<string, string> = {
-            pending_payment: 'bg-amber-100 text-amber-800',
-            confirmed: 'bg-blue-100 text-blue-800',
-            processing: 'bg-indigo-100 text-indigo-800',
-            shipped: 'bg-purple-100 text-purple-800',
-            delivered: 'bg-green-100 text-green-800',
-            completed: 'bg-green-100 text-green-800',
-            cancelled: 'bg-red-100 text-red-800',
-            partially_paid: 'bg-amber-100 text-amber-800',
-            partially_shipped: 'bg-purple-100 text-purple-800',
-        };
-        return styles[status] || 'bg-gray-100 text-gray-600';
+    const canonicalForOrder = (order: Order): CanonicalWorkflowStatus => {
+        return deriveCanonicalWorkflowStatus({
+            order: {
+                id: order.id,
+                status: order.status,
+                totalAmount: Number(order.totalAmount || 0),
+                paidAmount: Number(order.paidAmount || 0),
+                payments: order.payments || [],
+                paymentLinkSentAt: order.paymentLinkSentAt,
+                opsFinalCheckStatus: order.opsFinalCheckStatus,
+                opsFinalCheckedAt: order.opsFinalCheckedAt,
+                paymentConfirmedAt: order.paymentConfirmedAt,
+                forwardedToOpsAt: order.forwardedToOpsAt,
+            },
+        });
     };
 
-    const getProgressSteps = (status: string) => {
-        const allSteps = ['pending_payment', 'confirmed', 'processing', 'shipped', 'delivered'];
-        const currentIdx = allSteps.indexOf(status);
-        return allSteps.map((step, i) => ({
-            label: step.replace(/_/g, ' '),
+    const getProgressSteps = (canonical: CanonicalWorkflowStatus) => {
+        const steps = [
+            'Ops Final Check',
+            'Payment Pending',
+            'Payment Link Sent',
+            'Paid Confirmed',
+            'Ready for Ops',
+            'In Ops Processing',
+            'Closed',
+        ];
+        const statusStepIndex: Record<CanonicalWorkflowStatus, number> = {
+            SUBMITTED: 0,
+            UNDER_REVIEW: 0,
+            OPS_FORWARDED: 0,
+            QUOTED: 0,
+            COUNTER: 0,
+            FINAL: 0,
+            ACCEPTED_PENDING_OPS_RECHECK: 0,
+            ACCEPTED_PAYMENT_PENDING: 1,
+            PAYMENT_LINK_SENT: 2,
+            PAID_CONFIRMED: 3,
+            READY_FOR_OPS: 4,
+            IN_OPS_PROCESSING: 5,
+            CLOSED_ACCEPTED: 6,
+            CLOSED_DECLINED: 6,
+        };
+        const currentIdx = statusStepIndex[canonical] ?? 0;
+        return steps.map((label, i) => ({
+            label,
             done: i <= currentIdx,
             current: i === currentIdx,
         }));
+    };
+
+    const hasSalesPaymentLink = (order: Order): boolean => {
+        return Boolean(order.paymentLinkSentAt);
+    };
+
+    const isOpsFinalApproved = (order: Order): boolean => {
+        const status = String(order.opsFinalCheckStatus || '').toLowerCase();
+        if (status === 'approved') return true;
+        if (status === 'rejected' || status === 'pending') return false;
+        return Boolean(order.paymentLinkSentAt || order.paymentConfirmedAt || order.forwardedToOpsAt);
     };
 
     return (
         <div className="max-w-5xl mx-auto px-4 py-8">
             <div className="mb-8">
                 <h1 className="text-2xl font-bold text-primary-900">My Orders</h1>
-                <p className="text-primary-500 mt-1">Track your orders and manage payments</p>
+                <p className="text-primary-500 mt-1">Track orders and use this page as payment fallback/history.</p>
             </div>
 
             {loading ? (
@@ -156,6 +285,22 @@ export default function BuyerOrdersPage() {
                         const total = Number(order.totalAmount);
                         const paid = Number(order.paidAmount);
                         const remaining = total - paid;
+                        const canonical = canonicalForOrder(order);
+                        const isOrderPaid =
+                            ['PAID_CONFIRMED', 'READY_FOR_OPS', 'IN_OPS_PROCESSING', 'CLOSED_ACCEPTED'].includes(canonical) ||
+                            (total > 0 && paid >= total) ||
+                            order.payments.some((p) => ['paid', 'completed'].includes(String(p.status || '').toLowerCase()));
+                        const rawPaymentNotice = paymentNoticeByOrderId[order.id] || '';
+                        const noticeLooksFailed = rawPaymentNotice.toLowerCase().includes('failed');
+                        const effectivePaymentNotice = noticeLooksFailed && isOrderPaid ? '' : rawPaymentNotice;
+                        const paymentLinkSent = hasSalesPaymentLink(order);
+                        const canPayFromBuyerSide =
+                            (canonical === 'ACCEPTED_PAYMENT_PENDING' || canonical === 'PAYMENT_LINK_SENT') &&
+                            paymentLinkSent &&
+                            isOpsFinalApproved(order);
+                        const hasPendingManualVerification = order.payments.some(
+                            (p) => String(p.method || '').toLowerCase() === 'bank_transfer' && String(p.status || '').toLowerCase() === 'pending'
+                        );
 
                         return (
                             <div key={order.id} className="bg-white rounded-2xl border border-primary-100 shadow-sm overflow-hidden">
@@ -167,8 +312,8 @@ export default function BuyerOrdersPage() {
                                     <div>
                                         <div className="flex items-center gap-3">
                                             <h3 className="font-semibold text-primary-900">{order.orderNumber}</h3>
-                                            <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusStyle(order.status)}`}>
-                                                {order.status.replace(/_/g, ' ')}
+                                            <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${canonicalStatusBadgeClass(canonical)}`}>
+                                                {canonicalStatusDisplayLabel(canonical)}
                                             </span>
                                         </div>
                                         <p className="text-sm text-primary-400 mt-1">
@@ -176,9 +321,9 @@ export default function BuyerOrdersPage() {
                                         </p>
                                     </div>
                                     <div className="text-right">
-                                        <p className="text-2xl font-bold text-primary-900">${total.toLocaleString()}</p>
+                                        <p className="text-2xl font-bold text-primary-900">₹{total.toLocaleString('en-IN')}</p>
                                         {paid > 0 && paid < total && (
-                                            <p className="text-xs text-primary-400">Paid: ${paid.toLocaleString()}</p>
+                                            <p className="text-xs text-primary-400">Paid: ₹{paid.toLocaleString('en-IN')}</p>
                                         )}
                                     </div>
                                 </div>
@@ -186,11 +331,14 @@ export default function BuyerOrdersPage() {
                                 {/* Progress bar */}
                                 <div className="px-6 pb-4">
                                     <div className="flex items-center justify-between mb-2">
-                                        <div className="flex items-center gap-1 flex-1">
-                                            {getProgressSteps(order.status).map((step, i) => (
-                                                <div key={i} className="flex-1 flex flex-col items-center">
+                                        <div className="flex items-center gap-1 flex-1 min-w-0">
+                                            {getProgressSteps(canonical).map((step, i) => (
+                                                <div key={i} className="flex-1 flex flex-col min-w-0">
                                                     <div className={`h-1.5 w-full rounded-full ${step.done ? 'bg-primary-900' : 'bg-primary-100'}`} />
-                                                    <span className={`text-[10px] mt-1 ${step.current ? 'text-primary-900 font-medium' : 'text-primary-300'}`}>
+                                                    <span
+                                                        className={`text-[10px] mt-1 leading-4 truncate ${step.current ? 'text-primary-900 font-medium' : 'text-primary-300'}`}
+                                                        title={step.label}
+                                                    >
                                                         {step.label}
                                                     </span>
                                                 </div>
@@ -218,24 +366,37 @@ export default function BuyerOrdersPage() {
                                     <div className="border-t border-primary-50">
                                         {/* Items */}
                                         <div className="divide-y divide-primary-50">
-                                            {order.items.map((item) => (
-                                                <div key={item.id} className="flex items-center gap-4 p-4 px-6">
-                                                    <div className="w-12 h-12 rounded-lg bg-primary-50 border border-primary-100 flex-shrink-0 overflow-hidden">
-                                                        {item.inventoryItem?.imageUrl ? (
-                                                            <img src={item.inventoryItem.imageUrl} alt="" className="w-full h-full object-cover" />
-                                                        ) : (
-                                                            <div className="w-full h-full flex items-center justify-center text-primary-300 text-sm">💎</div>
-                                                        )}
+                                            {order.items.map((item) => {
+                                                const itemName =
+                                                    item.inventoryItem?.name ||
+                                                    item.quotationItem?.cartItem?.recommendationItem?.inventorySku?.name ||
+                                                    item.quotationItem?.cartItem?.recommendationItem?.manufacturerItem?.name ||
+                                                    'Item';
+
+                                                const itemImage =
+                                                    item.inventoryItem?.imageUrl ||
+                                                    item.quotationItem?.cartItem?.recommendationItem?.inventorySku?.imageUrl ||
+                                                    item.quotationItem?.cartItem?.recommendationItem?.manufacturerItem?.imageUrl;
+
+                                                return (
+                                                    <div key={item.id} className="flex items-center gap-4 p-4 px-6">
+                                                        <div className="w-12 h-12 rounded-lg bg-primary-50 border border-primary-100 flex-shrink-0 overflow-hidden">
+                                                            {itemImage ? (
+                                                                <img src={itemImage} alt="" className="w-full h-full object-cover" />
+                                                            ) : (
+                                                                <div className="w-full h-full flex items-center justify-center text-primary-300 text-sm">💎</div>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex-1">
+                                                            <div className="font-medium text-primary-800 text-sm">{itemName}</div>
+                                                        </div>
+                                                        <div className="text-sm text-right">
+                                                            <div className="text-primary-500">{item.quantity} × ₹{Number(item.unitPrice || 0).toFixed(2)}</div>
+                                                            <div className="font-semibold text-primary-900">₹{Number(item.totalPrice || Number(item.unitPrice || 0) * item.quantity).toFixed(2)}</div>
+                                                        </div>
                                                     </div>
-                                                    <div className="flex-1">
-                                                        <div className="font-medium text-primary-800 text-sm">{item.inventoryItem?.name || 'Item'}</div>
-                                                    </div>
-                                                    <div className="text-sm text-right">
-                                                        <div className="text-primary-500">{item.quantity} × ${Number(item.unitPrice).toFixed(2)}</div>
-                                                        <div className="font-semibold text-primary-900">${Number(item.totalPrice).toFixed(2)}</div>
-                                                    </div>
-                                                </div>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
 
                                         {/* Shipments */}
@@ -256,6 +417,14 @@ export default function BuyerOrdersPage() {
                                         {/* Payments */}
                                         <div className="px-6 py-4 border-t border-primary-50">
                                             <h4 className="text-sm font-medium text-primary-800 mb-2">Payment History</h4>
+                                            {hasPendingManualVerification && (
+                                                <p className="text-xs text-amber-700 mb-2">Awaiting Sales confirmation for bank transfer.</p>
+                                            )}
+                                            {effectivePaymentNotice && (
+                                                <p className={`text-xs mb-2 ${noticeLooksFailed ? 'text-red-600' : 'text-green-700'}`}>
+                                                    {effectivePaymentNotice}
+                                                </p>
+                                            )}
                                             {order.payments.length === 0 ? (
                                                 <p className="text-sm text-primary-400">No payments recorded</p>
                                             ) : (
@@ -263,7 +432,8 @@ export default function BuyerOrdersPage() {
                                                     {order.payments.map((p) => (
                                                         <div key={p.id} className="flex items-center justify-between text-sm py-1">
                                                             <span className="text-primary-600">
-                                                                ${Number(p.amount).toFixed(2)} via {p.method.replace('_', ' ')}
+                                                                ₹{Number(p.amount).toFixed(2)} via {p.method.replace('_', ' ')}
+                                                                {p.gatewayRef ? ` • Stripe Ref: ${p.gatewayRef}` : ''}
                                                             </span>
                                                             <span className={p.status === 'completed' ? 'text-green-600' : 'text-amber-600'}>
                                                                 {p.status}
@@ -275,13 +445,13 @@ export default function BuyerOrdersPage() {
                                         </div>
 
                                         {/* Pay button */}
-                                        {['pending_payment', 'partially_paid'].includes(order.status) && (
+                                        {canPayFromBuyerSide && (
                                             <div className="px-6 py-4 border-t border-primary-50 bg-primary-25/50">
                                                 {paymentModal === order.id ? (
                                                     <div className="space-y-4">
                                                         <h4 className="font-medium text-primary-800">Make a Payment</h4>
                                                         <div className="text-sm text-primary-500 mb-2">
-                                                            Remaining: <span className="font-semibold text-primary-900">${remaining.toLocaleString()}</span>
+                                                            Remaining: <span className="font-semibold text-primary-900">₹{remaining.toLocaleString('en-IN')}</span>
                                                         </div>
                                                         <div className="grid gap-3 md:grid-cols-3">
                                                             <div>
@@ -291,7 +461,7 @@ export default function BuyerOrdersPage() {
                                                                     value={payMethod}
                                                                     onChange={(e) => setPayMethod(e.target.value as 'card' | 'bank_transfer' | 'upi')}
                                                                 >
-                                                                    <option value="card">Card</option>
+                                                                    <option value="card">Card (Stripe)</option>
                                                                     <option value="bank_transfer">Bank Transfer</option>
                                                                     <option value="upi">UPI</option>
                                                                 </select>
@@ -342,9 +512,22 @@ export default function BuyerOrdersPage() {
                                                         }}
                                                         className="px-5 py-2.5 rounded-xl bg-primary-900 text-white font-medium text-sm"
                                                     >
-                                                        Pay ${remaining.toLocaleString()} →
+                                                        Pay ₹{remaining.toLocaleString('en-IN')} →
                                                     </button>
                                                 )}
+                                            </div>
+                                        )}
+
+                                        {!canPayFromBuyerSide && (canonical === 'ACCEPTED_PENDING_OPS_RECHECK' || canonical === 'ACCEPTED_PAYMENT_PENDING' || canonical === 'PAYMENT_LINK_SENT') && (
+                                            <div className="px-6 py-4 border-t border-primary-50 bg-amber-50/40">
+                                                <p className="text-sm font-medium text-amber-700">
+                                                    {canonical === 'ACCEPTED_PENDING_OPS_RECHECK' ? 'Awaiting Ops final check approval' : 'Awaiting payment link from Sales'}
+                                                </p>
+                                                <p className="text-xs text-amber-600 mt-1">
+                                                    {canonical === 'ACCEPTED_PENDING_OPS_RECHECK'
+                                                        ? 'Payment will be enabled after Ops approves and Sales sends the payment link.'
+                                                        : 'Payment will be enabled here once Sales sends the link.'}
+                                                </p>
                                             </div>
                                         )}
 
@@ -355,12 +538,14 @@ export default function BuyerOrdersPage() {
                                             </div>
                                         )}
                                     </div>
-                                )}
+                                )
+                                }
                             </div>
                         );
                     })}
                 </div>
-            )}
-        </div>
+            )
+            }
+        </div >
     );
 }

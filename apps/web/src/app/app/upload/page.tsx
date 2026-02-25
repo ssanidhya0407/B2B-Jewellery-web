@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -30,21 +30,30 @@ export default function UploadPage() {
     const searchParams = useSearchParams();
     const [uploading, setUploading] = useState(false);
     const [preview, setPreview] = useState<string | null>(null);
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [category, setCategory] = useState(searchParams.get('category') || '');
     const [maxUnitPrice, setMaxUnitPrice] = useState('');
     const [context, setContext] = useState('');
+    const [featureSuggestions, setFeatureSuggestions] = useState<string[]>([]);
+    const [selectedFeatures, setSelectedFeatures] = useState<string[]>([]);
+    const [detectingFeatures, setDetectingFeatures] = useState(false);
+    const [featureError, setFeatureError] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
     const onDrop = useCallback((acceptedFiles: File[]) => {
         const file = acceptedFiles[0];
         if (file) {
+            setSelectedFile(file);
             const reader = new FileReader();
             reader.onload = () => setPreview(reader.result as string);
             reader.readAsDataURL(file);
+            setFeatureSuggestions([]);
+            setSelectedFeatures([]);
+            setFeatureError(null);
         }
     }, []);
 
-    const { getRootProps, getInputProps, isDragActive, acceptedFiles } = useDropzone({
+    const { getRootProps, getInputProps, isDragActive } = useDropzone({
         onDrop,
         accept: {
             'image/jpeg': ['.jpg', '.jpeg'],
@@ -55,8 +64,45 @@ export default function UploadPage() {
         maxFiles: 1,
     });
 
+    useEffect(() => {
+        if (!selectedFile || !category) return;
+
+        let cancelled = false;
+        const detectFeatures = async () => {
+            setDetectingFeatures(true);
+            setFeatureError(null);
+            try {
+                const result = await api.suggestImageFeatures(selectedFile, { category });
+                if (cancelled) return;
+                const suggestions = Array.isArray(result.features) ? result.features : [];
+                setFeatureSuggestions(suggestions);
+                setSelectedFeatures(suggestions);
+            } catch (err) {
+                if (cancelled) return;
+                setFeatureSuggestions([]);
+                setSelectedFeatures([]);
+                setFeatureError(err instanceof Error ? err.message : 'Could not fetch AI feature suggestions.');
+            } finally {
+                if (!cancelled) setDetectingFeatures(false);
+            }
+        };
+
+        detectFeatures();
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedFile, category]);
+
+    const toggleFeature = useCallback((feature: string) => {
+        setSelectedFeatures((prev) => (
+            prev.includes(feature)
+                ? prev.filter((item) => item !== feature)
+                : [...prev, feature]
+        ));
+    }, []);
+
     const handleUpload = async () => {
-        if (acceptedFiles.length === 0) return;
+        if (!selectedFile) return;
         if (!category) {
             setError('Please select a category before uploading.');
             return;
@@ -66,9 +112,14 @@ export default function UploadPage() {
         setError(null);
 
         try {
-            const result = await api.uploadImage(acceptedFiles[0], {
+            const selectedFeatureContext = selectedFeatures.length > 0
+                ? `Preferred features: ${selectedFeatures.join(', ')}`
+                : '';
+            const uploadContext = [context.trim(), selectedFeatureContext].filter(Boolean).join(' | ');
+
+            const result = await api.uploadImage(selectedFile, {
                 category,
-                context: context || undefined,
+                context: uploadContext || undefined,
                 maxUnitPrice: maxUnitPrice ? Number(maxUnitPrice) : undefined,
             });
 
@@ -206,6 +257,52 @@ export default function UploadPage() {
                                 </div>
                             </div>
 
+                            {selectedFile && category && (
+                                <div className="mt-6 rounded-2xl border border-primary-100/60 bg-white p-4 sm:p-5">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary-400">AI Feature Selection</p>
+                                            <h3 className="text-sm font-semibold text-primary-900 mt-1">Detected from image (Hugging Face)</h3>
+                                        </div>
+                                        {detectingFeatures && (
+                                            <span className="text-xs text-primary-400">Detecting…</span>
+                                        )}
+                                    </div>
+
+                                    {featureError && (
+                                        <p className="text-xs text-red-600 mt-3">{featureError}</p>
+                                    )}
+
+                                    {!detectingFeatures && featureSuggestions.length === 0 && !featureError && (
+                                        <p className="text-xs text-primary-400 mt-3">No confident features detected. You can still continue with notes.</p>
+                                    )}
+
+                                    {featureSuggestions.length > 0 && (
+                                        <>
+                                            <p className="text-xs text-primary-500 mt-3 mb-2">Select features to include in your request context.</p>
+                                            <div className="flex flex-wrap gap-2">
+                                                {featureSuggestions.map((feature) => {
+                                                    const selected = selectedFeatures.includes(feature);
+                                                    return (
+                                                        <button
+                                                            key={feature}
+                                                            type="button"
+                                                            onClick={() => toggleFeature(feature)}
+                                                            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${selected
+                                                                ? 'border-gold-300 bg-gold-50 text-gold-700'
+                                                                : 'border-primary-200 text-primary-500 hover:border-primary-300'
+                                                                }`}
+                                                        >
+                                                            {feature}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
                             {error && (
                                 <div className="mt-5 p-3 rounded-xl text-sm" style={{ background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)', color: '#b91c1c' }}>
                                     {error}
@@ -214,7 +311,7 @@ export default function UploadPage() {
 
                             <button
                                 onClick={handleUpload}
-                                disabled={acceptedFiles.length === 0 || uploading || !category}
+                                disabled={!selectedFile || uploading || !category}
                                 className="btn-gold w-full mt-6 disabled:opacity-40 disabled:cursor-not-allowed text-base"
                             >
                                 {uploading ? (

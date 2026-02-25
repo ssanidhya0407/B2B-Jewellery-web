@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { GlobalImageFallback } from '@/components/GlobalImageFallback';
 
 export const metadata: Metadata = {
     title: 'Visual Jewellery Sourcing | B2B Platform',
@@ -13,7 +14,10 @@ export default function RootLayout({
 }) {
     return (
         <html lang="en">
-            <body className="antialiased">{children}</body>
+            <body className="antialiased">
+                <GlobalImageFallback />
+                {children}
+            </body>
         </html>
     );
 }

@@ -54,7 +54,11 @@ model User {
   marginConfigurations MarginConfiguration[]
   buyerOrders          Order[]               @relation("buyer_orders")
   salesOrders          Order[]               @relation("sales_orders")
-  commissions          Commission[]
+  paymentLinksSent     Order[]               @relation("orders_payment_link_sent_by")
+  paymentConfirmations Order[]               @relation("orders_payment_confirmed_by")
+  opsForwards          Order[]               @relation("orders_forwarded_to_ops_by")
+  opsFinalChecks       Order[]               @relation("orders_ops_final_checked_by")
+  commissionRecords    CommissionRecord[]
   notifications        Notification[]
   messages             Message[]
   confirmedPayments    Payment[]
@@ -343,6 +347,8 @@ model CartItem {
 enum QuotationStatus {
   draft
   sent
+  negotiating
+  countered
   accepted
   rejected
   expired
@@ -447,6 +453,18 @@ model Order {
   balanceRequestedAt DateTime?   @map("balance_requested_at")
   balanceDueAt       DateTime?   @map("balance_due_at")
   paymentExpiresAt   DateTime?   @map("payment_expires_at")
+  paymentLinkSentAt  DateTime?   @map("payment_link_sent_at")
+  paymentLinkSentById String?    @map("payment_link_sent_by_id") @db.Uuid
+  paymentLinkChannel String?     @map("payment_link_channel") @db.VarChar(50)
+  paymentConfirmedAt DateTime?   @map("payment_confirmed_at")
+  paymentConfirmedById String?   @map("payment_confirmed_by_id") @db.Uuid
+  paymentConfirmationSource String? @map("payment_confirmation_source") @db.VarChar(50)
+  opsFinalCheckStatus String     @default("approved") @map("ops_final_check_status") @db.VarChar(20)
+  opsFinalCheckedAt   DateTime?  @map("ops_final_checked_at")
+  opsFinalCheckedById String?    @map("ops_final_checked_by_id") @db.Uuid
+  opsFinalCheckReason String?    @map("ops_final_check_reason")
+  forwardedToOpsAt   DateTime?   @map("forwarded_to_ops_at")
+  forwardedToOpsById String?     @map("forwarded_to_ops_by_id") @db.Uuid
   createdAt          DateTime    @default(now()) @map("created_at")
   updatedAt          DateTime    @updatedAt @map("updated_at")
 
@@ -454,10 +472,14 @@ model Order {
   quotation   Quotation           @relation(fields: [quotationId], references: [id])
   buyer       User                @relation("buyer_orders", fields: [buyerId], references: [id])
   salesPerson User?               @relation("sales_orders", fields: [salesPersonId], references: [id])
+  paymentLinkSentBy User?         @relation("orders_payment_link_sent_by", fields: [paymentLinkSentById], references: [id])
+  paymentConfirmedBy User?        @relation("orders_payment_confirmed_by", fields: [paymentConfirmedById], references: [id])
+  opsFinalCheckedBy User?         @relation("orders_ops_final_checked_by", fields: [opsFinalCheckedById], references: [id])
+  forwardedToOpsBy User?          @relation("orders_forwarded_to_ops_by", fields: [forwardedToOpsById], references: [id])
   items       OrderItem[]
-  payments    Payment[]
-  commissions Commission[]
-  shipments   Shipment[]
+  payments          Payment[]
+  commissionRecords CommissionRecord[]
+  shipments         Shipment[]
   procurement ProcurementRecord[]
 
   @@map("orders")
@@ -536,14 +558,30 @@ model Payment {
 // COMMISSIONS
 // ============================================
 
-model Commission {
+model CommissionStructure {
+  id              String   @id @default(uuid()) @db.Uuid
+  name            String   @db.VarChar(100)
+  type            String   @db.VarChar(20) // percentage | fixed | tiered
+  value           Decimal  @db.Decimal(10, 2)
+  baseRate        Decimal  @map("base_rate") @db.Decimal(10, 2)
+  thresholdAmount Decimal? @map("threshold_amount") @db.Decimal(12, 2)
+  acceleratedRate Decimal? @map("accelerated_rate") @db.Decimal(10, 2)
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("commission_structures")
+}
+
+model CommissionRecord {
   id               String   @id @default(uuid()) @db.Uuid
   orderId          String   @map("order_id") @db.Uuid
   salesPersonId    String   @map("sales_person_id") @db.Uuid
-  commissionRate   Decimal  @map("commission_rate") @db.Decimal(5, 2)
-  deliveredValue   Decimal  @map("delivered_value") @db.Decimal(12, 2)
-  commissionAmount Decimal  @map("commission_amount") @db.Decimal(12, 2)
+  commissionRate   Decimal? @map("commission_rate") @db.Decimal(5, 2)
+  deliveredValue   Decimal? @map("delivered_value") @db.Decimal(12, 2)
+  amount           Decimal  @map("amount") @db.Decimal(12, 2)
   status           String   @default("pending") @db.VarChar(20)
+  calculatedAt     DateTime @default(now()) @map("calculated_at")
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
@@ -551,7 +589,7 @@ model Commission {
   order       Order @relation(fields: [orderId], references: [id])
   salesPerson User  @relation(fields: [salesPersonId], references: [id])
 
-  @@map("commissions")
+  @@map("commission_records")
 }
 
 // ============================================

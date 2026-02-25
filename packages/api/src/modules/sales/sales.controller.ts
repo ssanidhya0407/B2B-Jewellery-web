@@ -110,11 +110,33 @@ export class SalesController {
         return this.salesService.getCommissionReport(user.id);
     }
 
+    @Get('commissions/structure')
+    async getCommissionStructure() {
+        return this.salesService.getCommissionStructure();
+    }
+
+    @Post('commissions/structure')
+    async saveCommissionStructure(
+        @Body() body: {
+            baseRate: number;
+            highValueRate: number;
+            highValueThreshold: number;
+            paidBonusRate: number;
+        },
+    ) {
+        return this.salesService.saveCommissionStructure(body);
+    }
+
     // ─── Buyer Onboarding ───
 
     @Get('buyers')
     async getBuyers() {
         return this.salesService.getBuyers();
+    }
+
+    @Get('buyers/:id/requests')
+    async getBuyerRequests(@Param('id') buyerId: string, @CurrentUser() user: User) {
+        return this.salesService.getBuyerRequests(user.id, buyerId);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -129,6 +151,59 @@ export class SalesController {
     @Post('orders/:id/request-balance')
     async requestBalancePayment(@Param('id') orderId: string, @CurrentUser() user: User) {
         return this.salesService.requestBalancePayment(orderId, user.id);
+    }
+
+    @Post('orders/:id/payment-link')
+    async createPaymentLink(@Param('id') orderId: string, @CurrentUser() user: User) {
+        return this.salesService.createOrderPaymentLink(orderId, user.id);
+    }
+
+    @Post('quotations/:id/payment-link')
+    async createQuotationPaymentLink(@Param('id') quotationId: string, @CurrentUser() user: User) {
+        return this.salesService.createQuotationPaymentLink(quotationId, user.id);
+    }
+
+    @Post('orders/:id/payment-link/resend')
+    async resendPaymentLink(@Param('id') orderId: string, @CurrentUser() user: User) {
+        return this.salesService.resendOrderPaymentLink(orderId, user.id);
+    }
+
+    @Post('quotations/:id/payment-link/resend')
+    async resendQuotationPaymentLink(@Param('id') quotationId: string, @CurrentUser() user: User) {
+        return this.salesService.resendQuotationPaymentLink(quotationId, user.id);
+    }
+
+    @Get('orders/:id/payment-status')
+    async getPaymentStatus(@Param('id') orderId: string, @CurrentUser() user: User) {
+        return this.salesService.getOrderPaymentStatus(orderId, user.id);
+    }
+
+    @Get('quotations/:id/payment-status')
+    async getQuotationPaymentStatus(@Param('id') quotationId: string, @CurrentUser() user: User) {
+        return this.salesService.getQuotationPaymentStatus(quotationId, user.id);
+    }
+
+    @Post('orders/:id/payment-confirm')
+    async confirmPayment(
+        @Param('id') orderId: string,
+        @Body() body: { source?: string; reference?: string },
+        @CurrentUser() user: User,
+    ) {
+        return this.salesService.confirmOrderPayment(orderId, user.id, body);
+    }
+
+    @Post('quotations/:id/payment-confirm')
+    async confirmQuotationPayment(
+        @Param('id') quotationId: string,
+        @Body() body: { source?: string; reference?: string },
+        @CurrentUser() user: User,
+    ) {
+        return this.salesService.confirmQuotationPayment(quotationId, user.id, body);
+    }
+
+    @Post('orders/:id/forward-to-ops')
+    async forwardPaidOrderToOps(@Param('id') orderId: string, @CurrentUser() user: User) {
+        return this.salesService.forwardPaidOrderToOps(orderId, user.id);
     }
 
     @Post('orders/:id/calculate-commission')

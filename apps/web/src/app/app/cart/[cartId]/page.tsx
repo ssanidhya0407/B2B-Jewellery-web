@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { getAuthPayload } from '@/lib/auth';
 import { updateOnboardingStep } from '@/lib/onboarding';
+import { deriveCanonicalWorkflowStatus, latestQuotationForThread } from '@/lib/workflow';
+import { canonicalStatusBadgeClass, canonicalStatusDisplayLabel } from '@/lib/workflow-ui';
 
 /* ── Types ── */
 interface CartItem {
@@ -66,12 +68,14 @@ const URGENCY = [
 ];
 
 /* ── Helpers ── */
-const fmt = (n: number | string) => `$${Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+const fmt = (n: number | string) => `₹${Number(n).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 const fmtRange = (min: number | string, max: number | string) => {
     const a = Number(min), b = Number(max);
     return a === b ? fmt(a) : `${fmt(a)} – ${fmt(b)}`;
 };
 const avg = (min: number | string, max: number | string) => (Number(min) + Number(max)) / 2;
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+const clampCounterReduction = (value: number) => Math.min(15, Math.max(0, round2(Number.isFinite(value) ? value : 0)));
 
 /* ═══════════════════════════════════════════════════════════════ */
 export default function CartPage() {
@@ -100,7 +104,7 @@ export default function CartPage() {
     /* Negotiation */
     const [negotiation, setNegotiation] = useState<Negotiation | null>(null);
     const [showNegCounterForm, setShowNegCounterForm] = useState(false);
-    const [negCounterPrices, setNegCounterPrices] = useState<Record<string, string>>({});
+    const [negCounterReductionPercent, setNegCounterReductionPercent] = useState(10);
     const [negCounterMessage, setNegCounterMessage] = useState('');
     const [negSubmitting, setNegSubmitting] = useState(false);
     const [negActionLoading, setNegActionLoading] = useState(false);
@@ -126,12 +130,7 @@ export default function CartPage() {
                         const neg = await api.getBuyerNegotiation(sentQuote.id) as Negotiation | null;
                         if (neg) {
                             setNegotiation(neg);
-                            if (neg.rounds?.length > 0) {
-                                const latest = neg.rounds[neg.rounds.length - 1];
-                                const init: Record<string, string> = {};
-                                latest.items.forEach((item) => { init[item.cartItemId] = Number(item.proposedUnitPrice).toString(); });
-                                setNegCounterPrices(init);
-                            }
+                            setNegCounterReductionPercent(10);
                         }
                     } catch { /* no negotiation */ }
                 }
@@ -185,11 +184,22 @@ export default function CartPage() {
 
     const handleBuyerCounter = async () => {
         if (!negotiation || !cart) return;
+        if (negCounterReductionPercent < 0 || negCounterReductionPercent > 15) {
+            setError('Counter reduction must be between 0% and 15%.');
+            return;
+        }
         setNegSubmitting(true);
         try {
+            const latestRound = negotiation.rounds?.[negotiation.rounds.length - 1];
+            const latestRoundPriceByItem = new Map(
+                (latestRound?.items || []).map((r) => [r.cartItemId, Number(r.proposedUnitPrice || 0)])
+            );
             const items = cart.items.map(item => ({
                 cartItemId: item.id,
-                proposedUnitPrice: parseFloat(negCounterPrices[item.id] || '0'),
+                proposedUnitPrice: round2(
+                    (latestRoundPriceByItem.get(item.id) || avg(item.recommendationItem.displayPriceMin, item.recommendationItem.displayPriceMax))
+                    * (1 - (negCounterReductionPercent / 100))
+                ),
                 quantity: item.quantity,
             })).filter(i => i.proposedUnitPrice > 0);
             const updated = await api.submitBuyerCounter(negotiation.id, { items, message: negCounterMessage || undefined }) as Negotiation;
@@ -269,12 +279,11 @@ export default function CartPage() {
     /* ── Computed ── */
     const totalEstimate = cart.items.reduce((sum, i) => sum + avg(i.recommendationItem.displayPriceMin, i.recommendationItem.displayPriceMax) * i.quantity, 0);
     const totalUnits = cart.items.reduce((s, i) => s + i.quantity, 0);
-    const statusMap: Record<string, { label: string; bg: string; text: string }> = {
-        draft: { label: 'Draft', bg: 'rgba(16,42,67,0.05)', text: '#486581' },
-        submitted: { label: 'Quote Requested', bg: 'rgba(232,185,49,0.1)', text: '#8f631a' },
-        quoted: { label: 'Quotation Ready', bg: 'rgba(16,185,129,0.08)', text: '#047857' },
-    };
-    const sts = statusMap[cart.status] || statusMap.draft;
+    const latestQuotationStatus = latestQuotationForThread(cart.quotations)?.status;
+    const canonicalStatus = deriveCanonicalWorkflowStatus({
+        cartStatus: cart.status,
+        latestQuotationStatus,
+    });
 
     /* ═══════════════════════════════════════════════════════════
        MAIN RENDER
@@ -293,8 +302,8 @@ export default function CartPage() {
                             <h1 className="font-display text-2xl font-bold text-primary-900 tracking-tight">
                                 {cart.status === 'draft' ? 'Cart' : 'Quote Request'}
                             </h1>
-                            <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: sts.bg, color: sts.text }}>
-                                {sts.label}
+                            <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${canonicalStatusBadgeClass(canonicalStatus)}`}>
+                                {cart.status === 'draft' ? 'Draft' : canonicalStatusDisplayLabel(canonicalStatus)}
                             </span>
                         </div>
                         <p className="text-sm text-primary-400">{cart.items.length} {cart.items.length === 1 ? 'item' : 'items'} · {totalUnits} units · Est. {fmt(Math.round(totalEstimate))}</p>
@@ -701,7 +710,7 @@ export default function CartPage() {
                                                         return (
                                                             <div key={item.id} className="flex items-center justify-between text-xs gap-3">
                                                                 <span className="text-primary-600 truncate">{nm} <span className="text-primary-300">×{item.quantity}</span></span>
-                                                                <span className="font-semibold text-primary-900 tabular-nums shrink-0">${Number(item.proposedUnitPrice).toFixed(2)}/ea</span>
+                                                                <span className="font-semibold text-primary-900 tabular-nums shrink-0">₹${Number(item.proposedUnitPrice).toFixed(2)}/ea</span>
                                                             </div>
                                                         );
                                                     })}
@@ -710,7 +719,7 @@ export default function CartPage() {
                                                 {/* Round total */}
                                                 <div className="px-4 py-2.5 flex items-center justify-between" style={{ background: 'rgba(16,42,67,0.02)', borderTop: '1px solid rgba(16,42,67,0.04)' }}>
                                                     <span className="text-xs font-medium text-primary-500">Round Total</span>
-                                                    <span className="text-sm font-bold text-primary-900 tabular-nums">${Number(round.proposedTotal).toFixed(2)}</span>
+                                                    <span className="text-sm font-bold text-primary-900 tabular-nums">₹${Number(round.proposedTotal).toFixed(2)}</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -744,19 +753,50 @@ export default function CartPage() {
                                         ) : (
                                             <div className="space-y-4">
                                                 <p className="text-xs font-semibold text-primary-700 uppercase tracking-wide">Your Counter Offer</p>
+                                                <div className="rounded-xl border border-primary-100/70 bg-primary-50/40 p-3.5">
+                                                        <div className="flex items-center justify-between mb-2">
+                                                            <span className="text-[11px] text-primary-500 font-semibold uppercase tracking-wide">Reduction</span>
+                                                            <div className="flex items-center gap-1">
+                                                                <input
+                                                                    type="number"
+                                                                    min={0}
+                                                                    max={15}
+                                                                    step={0.1}
+                                                                    value={negCounterReductionPercent}
+                                                                    onChange={(e) => setNegCounterReductionPercent(clampCounterReduction(Number(e.target.value)))}
+                                                                    className="w-20 px-2 py-1 rounded-lg border border-primary-200 text-sm text-right font-bold text-primary-900"
+                                                                />
+                                                                <span className="text-sm font-bold text-primary-900">%</span>
+                                                            </div>
+                                                        </div>
+                                                        <input
+                                                            type="range"
+                                                            min={0}
+                                                            max={15}
+                                                            step={0.1}
+                                                            value={negCounterReductionPercent}
+                                                            onChange={(e) => setNegCounterReductionPercent(clampCounterReduction(Number(e.target.value)))}
+                                                            className="w-full accent-primary-900"
+                                                        />
+                                                    <div className="flex justify-between mt-1 text-[10px] text-primary-400">
+                                                        <span>0%</span>
+                                                        <span className={`${negCounterReductionPercent === 10 ? 'text-primary-700 font-semibold' : ''}`}>10% recommended</span>
+                                                        <span>15% max</span>
+                                                    </div>
+                                                </div>
                                                 <div className="space-y-2">
                                                     {cart.items.map(item => {
                                                         const source = item.recommendationItem.inventorySku || item.recommendationItem.manufacturerItem;
+                                                        const latestRound = negotiation.rounds?.[negotiation.rounds.length - 1];
+                                                        const latest = latestRound?.items.find((r) => r.cartItemId === item.id);
+                                                        const baseUnit = Number(latest?.proposedUnitPrice || avg(item.recommendationItem.displayPriceMin, item.recommendationItem.displayPriceMax));
+                                                        const reducedUnit = round2(baseUnit * (1 - (negCounterReductionPercent / 100)));
                                                         return (
                                                             <div key={item.id} className="flex items-center gap-3 bg-primary-50/40 rounded-xl px-3.5 py-2.5">
                                                                 <span className="text-xs text-primary-600 flex-1 truncate">{source?.name || 'Item'} <span className="text-primary-300">×{item.quantity}</span></span>
-                                                                <div className="relative w-28">
-                                                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-primary-300">$</span>
-                                                                    <input type="number" step="0.01" min="0"
-                                                                        value={negCounterPrices[item.id] || ''}
-                                                                        onChange={e => setNegCounterPrices(p => ({ ...p, [item.id]: e.target.value }))}
-                                                                        className="w-full pl-7 pr-2 py-2 rounded-lg border border-primary-200/60 text-xs text-right font-medium text-primary-900 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 transition-all"
-                                                                        placeholder="0.00" />
+                                                                <div className="text-right">
+                                                                    <p className="text-[10px] text-primary-300 line-through">{fmt(baseUnit)}</p>
+                                                                    <p className="text-xs font-semibold text-primary-900">{fmt(reducedUnit)}</p>
                                                                 </div>
                                                             </div>
                                                         );

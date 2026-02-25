@@ -36,10 +36,10 @@ interface QuoteRequest {
 
 /* ───────── Helpers ───────── */
 const statusConfig: Record<string, { label: string; dot: string; bg: string; color: string; border: string }> = {
-    submitted:    { label: 'New',        dot: '#f59e0b', bg: 'rgba(245,158,11,0.06)', color: '#b45309', border: 'rgba(245,158,11,0.18)' },
-    under_review: { label: 'Reviewing',  dot: '#3b82f6', bg: 'rgba(59,130,246,0.06)', color: '#1d4ed8', border: 'rgba(59,130,246,0.18)' },
-    quoted:       { label: 'Quoted',     dot: '#10b981', bg: 'rgba(16,185,129,0.06)', color: '#047857', border: 'rgba(16,185,129,0.18)' },
-    closed:       { label: 'Closed',     dot: '#94a3b8', bg: 'rgba(100,116,139,0.06)', color: '#475569', border: 'rgba(100,116,139,0.18)' },
+    submitted: { label: 'New', dot: '#f59e0b', bg: 'rgba(245,158,11,0.06)', color: '#b45309', border: 'rgba(245,158,11,0.18)' },
+    under_review: { label: 'Reviewing', dot: '#3b82f6', bg: 'rgba(59,130,246,0.06)', color: '#1d4ed8', border: 'rgba(59,130,246,0.18)' },
+    quoted: { label: 'Quoted', dot: '#10b981', bg: 'rgba(16,185,129,0.06)', color: '#047857', border: 'rgba(16,185,129,0.18)' },
+    closed: { label: 'Closed', dot: '#94a3b8', bg: 'rgba(100,116,139,0.06)', color: '#475569', border: 'rgba(100,116,139,0.18)' },
 };
 
 const filters = [
@@ -62,7 +62,7 @@ function getItemName(item: CartItem): string {
         || 'Product';
 }
 
-function fmt(n: number) { return '$' + n.toLocaleString('en-US'); }
+function fmt(n: number) { return '₹' + n.toLocaleString('en-IN'); }
 
 function timeAgo(dateStr: string): string {
     const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);

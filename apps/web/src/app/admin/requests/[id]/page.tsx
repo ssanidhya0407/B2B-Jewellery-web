@@ -114,22 +114,25 @@ function getPriceRange(item: CartItem): string {
     if (rec?.displayPriceMin != null && rec?.displayPriceMax != null) {
         const lo = Number(rec.displayPriceMin);
         const hi = Number(rec.displayPriceMax);
-        return lo === hi ? `$${lo}` : `$${lo}–$${hi}`;
+        return lo === hi ? `₹${lo}` : `₹${lo}–₹${hi}`;
     }
-    if (rec?.indicativePrice) return `$${rec.indicativePrice}`;
+    if (rec?.indicativePrice) return `₹${rec.indicativePrice}`;
     return '—';
 }
 
 function getEstimate(item: CartItem): number {
     const rec = item.recommendationItem;
-    if (rec?.displayPriceMin != null && rec?.displayPriceMax != null) {
-        return ((Number(rec.displayPriceMin) + Number(rec.displayPriceMax)) / 2) * item.quantity;
+    if (rec?.displayPriceMin != null || rec?.displayPriceMax != null) {
+        let sum = 0, count = 0;
+        if (rec.displayPriceMin != null) { sum += Number(rec.displayPriceMin); count++; }
+        if (rec.displayPriceMax != null) { sum += Number(rec.displayPriceMax); count++; }
+        if (count > 0) return (sum / count) * item.quantity;
     }
     if (rec?.indicativePrice) return Number(rec.indicativePrice) * item.quantity;
     return 0;
 }
 
-function fmt(n: number) { return '$' + Math.round(n).toLocaleString('en-US'); }
+function fmt(n: number) { return '₹' + Math.round(n).toLocaleString('en-IN'); }
 
 /** Parse the `---`-delimited notes string into structured key/value pairs */
 function parseNotes(raw?: string | null): { delivery?: string; useCase?: string; urgency?: string; notes?: string } {
@@ -152,26 +155,26 @@ function parseNotes(raw?: string | null): { delivery?: string; useCase?: string;
 }
 
 const urgencyConfig: Record<string, { label: string; icon: string; color: string; bg: string; border: string }> = {
-    low:     { label: 'Flexible', icon: '🟢', color: '#047857', bg: 'rgba(16,185,129,0.06)', border: 'rgba(16,185,129,0.15)' },
-    medium:  { label: 'Standard', icon: '🟡', color: '#b45309', bg: 'rgba(245,158,11,0.06)', border: 'rgba(245,158,11,0.15)' },
-    high:    { label: 'Priority', icon: '🟠', color: '#c2410c', bg: 'rgba(234,88,12,0.06)', border: 'rgba(234,88,12,0.15)' },
-    urgent:  { label: 'Urgent',   icon: '🔴', color: '#b91c1c', bg: 'rgba(239,68,68,0.06)', border: 'rgba(239,68,68,0.15)' },
+    low: { label: 'Flexible', icon: '🟢', color: '#047857', bg: 'rgba(16,185,129,0.06)', border: 'rgba(16,185,129,0.15)' },
+    medium: { label: 'Standard', icon: '🟡', color: '#b45309', bg: 'rgba(245,158,11,0.06)', border: 'rgba(245,158,11,0.15)' },
+    high: { label: 'Priority', icon: '🟠', color: '#c2410c', bg: 'rgba(234,88,12,0.06)', border: 'rgba(234,88,12,0.15)' },
+    urgent: { label: 'Urgent', icon: '🔴', color: '#b91c1c', bg: 'rgba(239,68,68,0.06)', border: 'rgba(239,68,68,0.15)' },
 };
 
 const statusConfig: Record<string, { label: string; dot: string; bg: string; color: string; border: string }> = {
-    submitted:    { label: 'New',        dot: '#f59e0b', bg: 'rgba(245,158,11,0.06)', color: '#b45309', border: 'rgba(245,158,11,0.18)' },
-    under_review: { label: 'Reviewing',  dot: '#3b82f6', bg: 'rgba(59,130,246,0.06)', color: '#1d4ed8', border: 'rgba(59,130,246,0.18)' },
-    quoted:       { label: 'Quoted',     dot: '#10b981', bg: 'rgba(16,185,129,0.06)', color: '#047857', border: 'rgba(16,185,129,0.18)' },
-    closed:       { label: 'Closed',     dot: '#94a3b8', bg: 'rgba(100,116,139,0.06)', color: '#475569', border: 'rgba(100,116,139,0.18)' },
+    submitted: { label: 'New', dot: '#f59e0b', bg: 'rgba(245,158,11,0.06)', color: '#b45309', border: 'rgba(245,158,11,0.18)' },
+    under_review: { label: 'Reviewing', dot: '#3b82f6', bg: 'rgba(59,130,246,0.06)', color: '#1d4ed8', border: 'rgba(59,130,246,0.18)' },
+    quoted: { label: 'Quoted', dot: '#10b981', bg: 'rgba(16,185,129,0.06)', color: '#047857', border: 'rgba(16,185,129,0.18)' },
+    closed: { label: 'Closed', dot: '#94a3b8', bg: 'rgba(100,116,139,0.06)', color: '#475569', border: 'rgba(100,116,139,0.18)' },
 };
 
 const negStatusConfig: Record<string, { label: string; bg: string; color: string }> = {
-    open:           { label: 'Open',            bg: 'rgba(245,158,11,0.08)', color: '#b45309' },
-    counter_buyer:  { label: 'Buyer Countered', bg: 'rgba(37,99,235,0.08)',  color: '#1d4ed8' },
-    counter_seller: { label: 'You Countered',   bg: 'rgba(139,92,246,0.08)', color: '#7c3aed' },
-    accepted:       { label: 'Accepted',        bg: 'rgba(16,185,129,0.08)', color: '#047857' },
-    rejected:       { label: 'Rejected',        bg: 'rgba(239,68,68,0.08)',  color: '#b91c1c' },
-    closed:         { label: 'Closed',          bg: 'rgba(16,42,67,0.06)',   color: '#486581' },
+    open: { label: 'Open', bg: 'rgba(245,158,11,0.08)', color: '#b45309' },
+    counter_buyer: { label: 'Buyer Countered', bg: 'rgba(37,99,235,0.08)', color: '#1d4ed8' },
+    counter_seller: { label: 'You Countered', bg: 'rgba(139,92,246,0.08)', color: '#7c3aed' },
+    accepted: { label: 'Accepted', bg: 'rgba(16,185,129,0.08)', color: '#047857' },
+    rejected: { label: 'Rejected', bg: 'rgba(239,68,68,0.08)', color: '#b91c1c' },
+    closed: { label: 'Closed', bg: 'rgba(16,42,67,0.06)', color: '#486581' },
 };
 
 /* ═══════════ Page Component ═══════════ */
@@ -429,7 +432,7 @@ export default function RequestDetailPage() {
                         { label: 'Total Qty', value: String(totalQty) + ' pcs' },
                         { label: 'Est. Value', value: totalEstimate > 0 ? fmt(totalEstimate) : '—' },
                         { label: 'Quotes', value: String(request.quotations.length) },
-                        ...(request.session?.maxUnitPrice ? [{ label: 'Budget', value: `$${request.session.maxUnitPrice}/pc` }] : []),
+                        ...(request.session?.maxUnitPrice ? [{ label: 'Budget', value: `₹${request.session.maxUnitPrice}/pc` }] : []),
                     ].map(s => (
                         <div key={s.label} className="flex-1 min-w-[100px] p-3 rounded-xl" style={{ background: 'rgba(16,42,67,0.02)' }}>
                             <p className="text-[10px] uppercase tracking-wider text-primary-400 font-semibold mb-0.5">{s.label}</p>
@@ -528,7 +531,7 @@ export default function RequestDetailPage() {
                                         <span className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-lg bg-primary-50 text-primary-700 capitalize">{request.session.selectedCategory}</span>
                                     )}
                                     {request.session.maxUnitPrice && (
-                                        <span className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-lg bg-primary-50 text-primary-700">Max ${request.session.maxUnitPrice}</span>
+                                        <span className="inline-flex items-center text-xs font-medium px-2.5 py-1 rounded-lg bg-primary-50 text-primary-700">Max ₹${request.session.maxUnitPrice}</span>
                                     )}
                                     {request.session.geminiAttributes && Object.entries(request.session.geminiAttributes).slice(0, 6).map(([key, val]) => (
                                         <span key={key} className="inline-flex items-center text-xs px-2.5 py-1 rounded-lg bg-primary-50 text-primary-600">
@@ -611,7 +614,7 @@ export default function RequestDetailPage() {
                                                         <div className="shrink-0 text-right">
                                                             <label className="text-[9px] uppercase tracking-wider text-primary-400 font-semibold">Your Price</label>
                                                             <div className="relative mt-0.5">
-                                                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-primary-300">$</span>
+                                                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-primary-300">₹</span>
                                                                 <input type="number" step="0.01" min="0"
                                                                     value={prices[item.id] || ''}
                                                                     onChange={(e) => setPrices((p) => ({ ...p, [item.id]: e.target.value }))}
@@ -708,11 +711,10 @@ export default function RequestDetailPage() {
                                 {request.quotations.map((q) => (
                                     <div key={q.id} className="p-4 rounded-xl" style={{ background: 'rgba(16,42,67,0.015)', border: '1px solid rgba(16,42,67,0.06)' }}>
                                         <div className="flex items-center justify-between mb-3">
-                                            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
-                                                q.status === 'sent' ? 'bg-emerald-50 text-emerald-600'
-                                                : q.status === 'accepted' ? 'bg-green-50 text-green-700'
-                                                : 'bg-primary-50 text-primary-500'
-                                            }`}>
+                                            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${q.status === 'sent' ? 'bg-emerald-50 text-emerald-600'
+                                                    : q.status === 'accepted' ? 'bg-green-50 text-green-700'
+                                                        : 'bg-primary-50 text-primary-500'
+                                                }`}>
                                                 {q.status.charAt(0).toUpperCase() + q.status.slice(1)}
                                             </span>
                                             <p className="text-[11px] text-primary-400">
@@ -720,7 +722,7 @@ export default function RequestDetailPage() {
                                             </p>
                                         </div>
                                         <div className="flex items-baseline gap-2">
-                                            <p className="text-xl font-bold text-primary-900">${Number(q.quotedTotal).toFixed(2)}</p>
+                                            <p className="text-xl font-bold text-primary-900">₹${Number(q.quotedTotal).toFixed(2)}</p>
                                             <p className="text-xs text-primary-400">{q.items.length} line item{q.items.length !== 1 ? 's' : ''}</p>
                                         </div>
                                         {q.createdBy && (
@@ -819,16 +821,16 @@ export default function RequestDetailPage() {
                                                             return (
                                                                 <tr key={ri.id} className="border-t border-primary-50">
                                                                     <td className="px-3 py-1.5 text-primary-800">{itemName}</td>
-                                                                    <td className="px-3 py-1.5 text-right font-medium text-primary-900">${Number(ri.proposedUnitPrice).toFixed(2)}</td>
+                                                                    <td className="px-3 py-1.5 text-right font-medium text-primary-900">₹${Number(ri.proposedUnitPrice).toFixed(2)}</td>
                                                                     <td className="px-3 py-1.5 text-right text-primary-600">{ri.quantity}</td>
-                                                                    <td className="px-3 py-1.5 text-right font-medium text-primary-900">${Number(ri.lineTotal).toFixed(2)}</td>
+                                                                    <td className="px-3 py-1.5 text-right font-medium text-primary-900">₹${Number(ri.lineTotal).toFixed(2)}</td>
                                                                 </tr>
                                                             );
                                                         })}
                                                     </tbody>
                                                     <tfoot><tr className="border-t-2 border-primary-100">
                                                         <td colSpan={3} className="px-3 py-2 text-right font-semibold text-primary-600">Total</td>
-                                                        <td className="px-3 py-2 text-right font-bold text-primary-900">${Number(round.proposedTotal).toFixed(2)}</td>
+                                                        <td className="px-3 py-2 text-right font-bold text-primary-900">₹${Number(round.proposedTotal).toFixed(2)}</td>
                                                     </tr></tfoot>
                                                 </table>
                                             </div>
@@ -871,7 +873,7 @@ export default function RequestDetailPage() {
                                                                         <input type="number" step="0.01" min="0"
                                                                             value={counterPrices[item.id] || ''}
                                                                             onChange={(e) => setCounterPrices(p => ({ ...p, [item.id]: e.target.value }))}
-                                                                            className="w-full px-3 py-1.5 text-xs text-right rounded-lg border border-primary-200/60 outline-none focus:border-gold-400 focus:ring-2 focus:ring-gold-100 transition-all" placeholder="$/unit" />
+                                                                            className="w-full px-3 py-1.5 text-xs text-right rounded-lg border border-primary-200/60 outline-none focus:border-gold-400 focus:ring-2 focus:ring-gold-100 transition-all" placeholder="₹/unit" />
                                                                     </div>
                                                                 </div>
                                                             );
@@ -1003,11 +1005,11 @@ export default function RequestDetailPage() {
                                     <>
                                         <div className="flex justify-between">
                                             <span className="text-primary-400">Original</span>
-                                            <span className="font-medium text-primary-900">${Number(negotiation.rounds[0].proposedTotal).toFixed(2)}</span>
+                                            <span className="font-medium text-primary-900">₹${Number(negotiation.rounds[0].proposedTotal).toFixed(2)}</span>
                                         </div>
                                         <div className="flex justify-between">
                                             <span className="text-primary-400">Latest</span>
-                                            <span className="font-bold text-primary-900">${Number(negotiation.rounds[negotiation.rounds.length - 1].proposedTotal).toFixed(2)}</span>
+                                            <span className="font-bold text-primary-900">₹${Number(negotiation.rounds[negotiation.rounds.length - 1].proposedTotal).toFixed(2)}</span>
                                         </div>
                                         {negotiation.rounds.length > 1 && (() => {
                                             const original = Number(negotiation.rounds[0].proposedTotal);

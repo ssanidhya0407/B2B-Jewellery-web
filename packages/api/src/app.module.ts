@@ -16,6 +16,7 @@ import { SalesModule } from './modules/sales/sales.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { NegotiationsModule } from './modules/negotiations/negotiations.module';
+import { CommissionsModule } from './modules/commissions/commissions.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import configuration from './config/configuration';
 
@@ -39,6 +40,7 @@ import configuration from './config/configuration';
         NotificationsModule,
         OrdersModule,
         NegotiationsModule,
+        CommissionsModule,
     ],
     providers: [
         {

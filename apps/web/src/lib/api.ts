@@ -71,6 +71,30 @@ class ApiClient {
         return response.json();
     }
 
+    async suggestImageFeatures(
+        file: File,
+        data: { category: string; context?: string },
+    ): Promise<{ attributes: Record<string, unknown>; features: string[] }> {
+        const formData = new FormData();
+        formData.append('image', file);
+        formData.append('category', data.category);
+        if (data.context) formData.append('context', data.context);
+
+        const token = Cookies.get('accessToken');
+        const response = await fetch(`${this.baseUrl}/api/images/feature-suggestions`, {
+            method: 'POST',
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ message: 'Feature suggestion failed' }));
+            throw new Error(error.message);
+        }
+
+        return response.json();
+    }
+
     // Auth
     async register(data: {
         email: string;
@@ -187,8 +211,20 @@ class ApiClient {
         return this.request(`/internal/quotations/requests/${cartId}/status`, { method: 'PUT', body: { status } });
     }
 
+    async getSalesMessages(cartId: string) {
+        return this.request(`/sales/requests/${cartId}/messages`);
+    }
+
+    async sendSalesMessage(cartId: string, content: string) {
+        return this.request(`/sales/requests/${cartId}/messages`, { method: 'POST', body: { content } });
+    }
+
     async createQuotation(data: { cartId: string; items: Array<{ cartItemId: string; finalUnitPrice: number }> }) {
         return this.request('/internal/quotations', { method: 'POST', body: data });
+    }
+
+    async updateQuotation(quotationId: string, data: { items?: Array<{ cartItemId: string; finalUnitPrice: number }>; terms?: string }) {
+        return this.request(`/internal/quotations/${quotationId}`, { method: 'PUT', body: data });
     }
 
     async sendQuotation(quotationId: string) {
@@ -210,6 +246,22 @@ class ApiClient {
 
     async rejectQuotation(quotationId: string, reason?: string) {
         return this.request(`/orders/quotations/${quotationId}/reject`, { method: 'POST', body: { reason } });
+    }
+
+    async counterQuotation(quotationId: string, items: Array<{ cartItemId: string; finalUnitPrice: number }>) {
+        return this.request(`/orders/quotations/${quotationId}/counter`, { method: 'POST', body: { items } });
+    }
+
+    async getBuyerQuotationTracker(cartId: string) {
+        return this.request(`/orders/tracker/${cartId}`);
+    }
+
+    async getBuyerQuotationMessages(cartId: string) {
+        return this.request(`/orders/tracker/${cartId}/messages`);
+    }
+
+    async sendBuyerQuotationMessage(cartId: string, content: string) {
+        return this.request(`/orders/tracker/${cartId}/messages`, { method: 'POST', body: { content } });
     }
 
     async getMyOrders() {
@@ -293,6 +345,17 @@ class ApiClient {
 
     async updateOrderStatus(orderId: string, status: string) {
         return this.request(`/operations/orders/${orderId}/status`, { method: 'PUT', body: { status } });
+    }
+
+    async approveOpsFinalCheck(orderId: string) {
+        return this.request(`/operations/orders/${orderId}/final-check/approve`, { method: 'POST' });
+    }
+
+    async rejectOpsFinalCheck(orderId: string, reason?: string) {
+        return this.request(`/operations/orders/${orderId}/final-check/reject`, {
+            method: 'POST',
+            body: { reason: reason || '' },
+        });
     }
 
     async createProcurement(data: Record<string, unknown>) {
@@ -445,23 +508,40 @@ class ApiClient {
     }
 
     async convertToOrder(quotationId: string) {
-        return this.request('/sales/convert-order', { method: 'POST', body: { quotationId } });
-    }
-
-    async getSalesMessages(cartId: string) {
-        return this.request(`/sales/messages/${cartId}`);
-    }
-
-    async sendSalesMessage(cartId: string, content: string) {
-        return this.request('/sales/messages', { method: 'POST', body: { cartId, content } });
+        return this.request(`/sales/quotations/${quotationId}/convert-order`, { method: 'POST' });
     }
 
     async getCommissions() {
         return this.request('/sales/commissions');
     }
 
+    async getSalesCommissionStructure() {
+        return this.request('/sales/commissions/structure');
+    }
+
+    async saveSalesCommissionStructure(data: {
+        baseRate: number;
+        highValueRate: number;
+        highValueThreshold: number;
+        paidBonusRate: number;
+    }) {
+        return this.request('/sales/commissions/structure', { method: 'POST', body: data });
+    }
+
+    async getCommissionStructures() {
+        return this.request('/commissions/structures');
+    }
+
+    async saveCommissionStructureEntry(data: { name: string; type: string; value: number }) {
+        return this.request('/commissions/structures', { method: 'POST', body: data });
+    }
+
     async getBuyers() {
         return this.request('/sales/buyers');
+    }
+
+    async getSalesBuyerRequests(buyerId: string) {
+        return this.request(`/sales/buyers/${buyerId}/requests`);
     }
 
     // ─── Admin: Inventory ─────────────────────────────────────────
@@ -601,14 +681,52 @@ class ApiClient {
         return this.request(`/sales/orders/${orderId}/calculate-commission`, { method: 'POST' });
     }
 
+    async createSalesPaymentLink(targetId: string, type: 'order' | 'quotation' = 'order') {
+        const route = type === 'order'
+            ? `/sales/orders/${targetId}/payment-link`
+            : `/sales/quotations/${targetId}/payment-link`;
+        return this.request(route, { method: 'POST' });
+    }
+
+    async resendSalesPaymentLink(targetId: string, type: 'order' | 'quotation' = 'order') {
+        const route = type === 'order'
+            ? `/sales/orders/${targetId}/payment-link/resend`
+            : `/sales/quotations/${targetId}/payment-link/resend`;
+        return this.request(route, { method: 'POST' });
+    }
+
+    async getSalesPaymentStatus(targetId: string, type: 'order' | 'quotation' = 'order') {
+        const route = type === 'order'
+            ? `/sales/orders/${targetId}/payment-status`
+            : `/sales/quotations/${targetId}/payment-status`;
+        return this.request(route);
+    }
+
+    async confirmSalesPayment(targetId: string, data?: { source?: string; reference?: string }, type: 'order' | 'quotation' = 'order') {
+        const route = type === 'order'
+            ? `/sales/orders/${targetId}/payment-confirm`
+            : `/sales/quotations/${targetId}/payment-confirm`;
+        return this.request(route, { method: 'POST', body: data || {} });
+    }
+
+    async forwardPaidOrderToOps(orderId: string) {
+        return this.request(`/sales/orders/${orderId}/forward-to-ops`, { method: 'POST' });
+    }
+
+    async getSalesClosedQuotations() {
+        return this.request('/sales/closed-quotations');
+    }
+
     async getQuotationTracker(cartId: string) {
-        return this.request(`/sales/tracker/${cartId}`);
+        try {
+            return await this.request(`/sales/tracker/${cartId}`);
+        } catch {
+            // Fallback to buyer tracker route which resolves through the same service.
+            return this.request(`/orders/tracker/${cartId}`);
+        }
     }
 
     // ─── Quotation Tracker — Buyer ───────────────────────────────
-    async getBuyerQuotationTracker(cartId: string) {
-        return this.request(`/orders/tracker/${cartId}`);
-    }
 }
 
 export const api = new ApiClient(API_URL);

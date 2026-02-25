@@ -20,20 +20,11 @@ const navItems = [
     },
     {
         href: '/sales/requests',
-        label: 'Quote Requests',
-        icon: (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-            </svg>
-        ),
-    },
-    {
-        href: '/sales/quotes',
-        label: 'Quote Builder',
+        label: 'Quotes',
         section: 'Sales Tools',
         icon: (
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
             </svg>
         ),
     },
@@ -104,12 +95,12 @@ export default function SalesLayout({ children }: { children: ReactNode }) {
         'exact' in item && item.exact ? pathname === item.href : pathname === item.href || pathname.startsWith(item.href + '/');
 
     return (
-        <div className="min-h-screen flex" style={{ background: '#fafaf8' }}>
+        <div className="min-h-screen lg:h-screen flex overflow-hidden" style={{ background: '#fafaf8' }}>
             {sidebarOpen && (
                 <div className="fixed inset-0 z-40 bg-black/30 backdrop-blur-sm lg:hidden" onClick={() => setSidebarOpen(false)} />
             )}
 
-            <aside className={`fixed lg:sticky top-0 z-50 lg:z-auto h-screen w-64 bg-white border-r border-primary-100/60 flex flex-col transition-transform duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+            <aside className={`fixed top-0 left-0 z-50 h-screen w-64 bg-white border-r border-primary-100/60 flex flex-col transition-transform duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
                 <div className="h-16 flex items-center gap-2.5 px-5 border-b border-primary-100/60">
                     <Logo variant="dark" size="sm" showText={false} />
                     <div>
@@ -118,21 +109,21 @@ export default function SalesLayout({ children }: { children: ReactNode }) {
                     </div>
                 </div>
 
-                <nav className="flex-1 py-4 px-3 space-y-1 overflow-y-auto">
+                <nav className="flex-1 py-4 px-3 space-y-1.5 overflow-y-auto">
                     {navItems.map((item, idx) => (
                         <div key={item.href}>
                             {'section' in item && item.section && (
                                 <div className={`px-3 pt-4 pb-1 ${idx > 0 ? 'mt-2 border-t border-primary-100/60' : ''}`}>
-                                    <span className="text-[10px] font-bold uppercase tracking-wider text-primary-400">{item.section}</span>
+                                    <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-primary-400">{item.section}</span>
                                 </div>
                             )}
                             <Link
                                 href={item.href}
                                 onClick={() => setSidebarOpen(false)}
-                                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 ${isActive(item)
-                                    ? 'bg-blue-600 text-white shadow-md'
-                                    : 'text-primary-600 hover:bg-primary-50 hover:text-primary-900'
-                                }`}
+                                className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-200 ring-1 ${isActive(item)
+                                    ? 'bg-blue-600 text-white shadow-md ring-blue-600'
+                                    : 'text-primary-600 ring-transparent hover:bg-primary-50 hover:text-primary-900 hover:ring-primary-100'
+                                    }`}
                             >
                                 {item.icon}
                                 {item.label}
@@ -164,7 +155,7 @@ export default function SalesLayout({ children }: { children: ReactNode }) {
                 </div>
             </aside>
 
-            <div className="flex-1 min-w-0">
+            <div className="flex-1 min-w-0 lg:pl-64 h-screen overflow-y-auto overscroll-contain">
                 <header className="lg:hidden sticky top-0 z-30 bg-white/80 backdrop-blur-xl border-b border-primary-100/60 h-14 flex items-center px-4">
                     <button onClick={() => setSidebarOpen(true)} className="p-1.5 rounded-lg hover:bg-primary-50 text-primary-600">
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -173,7 +164,9 @@ export default function SalesLayout({ children }: { children: ReactNode }) {
                     </button>
                     <span className="ml-3 font-display text-sm font-semibold text-primary-900">Sales</span>
                 </header>
-                {children}
+                <div className="min-h-full">
+                    {children}
+                </div>
             </div>
         </div>
     );

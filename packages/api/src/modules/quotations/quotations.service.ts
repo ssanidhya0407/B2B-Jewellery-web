@@ -198,8 +198,8 @@ export class QuotationsService {
             where: { id: quotationId },
         });
 
-        if (!quotation || quotation.status !== 'draft') {
-            throw new BadRequestException('Quotation cannot be modified');
+        if (!quotation || !['draft', 'sent', 'negotiating', 'countered'].includes(quotation.status)) {
+            throw new BadRequestException('Quotation cannot be modified in its current state');
         }
 
         if (data.items) {
@@ -229,10 +229,31 @@ export class QuotationsService {
             });
 
             const quotedTotal = quotationItems.reduce((sum, item) => sum + item.lineTotal, 0);
+
+            // If the quote was countered by the buyer, the sales rep's update becomes the final 'negotiating' (final) price.
+            const newStatus = quotation.status === 'countered' ? 'negotiating' : quotation.status;
+
             await this.prisma.quotation.update({
                 where: { id: quotationId },
-                data: { quotedTotal },
+                data: { quotedTotal, status: newStatus as any },
             });
+
+            // If it was already sent/negotiating/countered, log this update so the tracker picks it up
+            if (quotation.status !== 'draft') {
+                const oldTotal = Number(quotation.quotedTotal || 0);
+                const newTotal = quotedTotal;
+                const fmt = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN');
+
+                const prefix = quotation.status === 'countered' ? '[System] Sales provided final quotation:' : '[System] Sales adjusted quotation:';
+
+                await this.prisma.message.create({
+                    data: {
+                        cartId: quotation.cartId,
+                        content: `${prefix} ${fmt(oldTotal)} → ${fmt(newTotal)}`,
+                        senderId: quotation.createdById,
+                    }
+                });
+            }
         }
 
         if (data.terms !== undefined) {
@@ -251,6 +272,7 @@ export class QuotationsService {
     async send(quotationId: string) {
         const quotation = await this.prisma.quotation.findUnique({
             where: { id: quotationId },
+            include: { cart: { include: { quotations: { orderBy: { createdAt: 'desc' }, take: 2 } } } }
         });
 
         if (!quotation) {
@@ -261,6 +283,10 @@ export class QuotationsService {
             throw new BadRequestException('Only draft quotations can be sent');
         }
 
+        // Check if there's a previous quotation that was countered
+        const previousQuotation = quotation.cart?.quotations.find(q => q.id !== quotationId);
+        const finalStatus = previousQuotation?.status === 'countered' ? 'negotiating' : 'sent';
+
         // Set expiry: validUntil if already set, otherwise 30 days from now
         const expiresAt = quotation.validUntil || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
@@ -268,11 +294,23 @@ export class QuotationsService {
         await this.prisma.quotation.update({
             where: { id: quotationId },
             data: {
-                status: 'sent',
+                status: finalStatus as any,
                 sentAt: new Date(),
                 expiresAt,
             },
         });
+
+        // Also log a system message
+        if (finalStatus === 'negotiating') {
+            const fmt = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN');
+            await this.prisma.message.create({
+                data: {
+                    cartId: quotation.cartId,
+                    content: `[System] Sales provided final quotation: ${fmt(Number(quotation.quotedTotal || 0))}`,
+                    senderId: quotation.createdById,
+                }
+            });
+        }
 
         // Update cart status
         await this.prisma.intendedCart.update({

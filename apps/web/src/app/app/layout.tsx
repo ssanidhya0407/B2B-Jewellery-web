@@ -8,6 +8,7 @@ import { clearAuthCookies } from '@/lib/auth';
 import Logo from '@/components/Logo';
 import { useOnboardingProgress } from '@/hooks/useOnboardingProgress';
 import BuyerAccessGate from '@/components/BuyerAccessGate';
+import GlobalBuyerChat from '@/components/GlobalBuyerChat';
 
 /* Main nav links (Cart is separate — shown as icon top-right) */
 const navItems = [
@@ -217,7 +218,10 @@ export default function BuyerWorkspaceLayout({ children }: { children: ReactNode
                 )}
             </header>
 
-            <BuyerAccessGate>{children}</BuyerAccessGate>
+            <BuyerAccessGate>
+                {children}
+                <GlobalBuyerChat />
+            </BuyerAccessGate>
         </div>
     );
 }
