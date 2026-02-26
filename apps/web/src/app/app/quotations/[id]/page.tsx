@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import QuotationTracker from '@/components/QuotationTracker';
-import { MessageSquare, Send, X, ChevronRight, Clock, Building2, Package, MapPin, Truck, Phone, Search, ShoppingCart } from 'lucide-react';
+import { X, ChevronRight, Clock, Building2, Package, MapPin, Truck, Phone, Search, ShoppingCart } from 'lucide-react';
 import { canUseNegotiationChat, deriveCanonicalWorkflowStatus, latestQuotationForThread } from '@/lib/workflow';
 import { canonicalStatusBadgeClass, canonicalStatusDisplayLabel } from '@/lib/workflow-ui';
 import { startStripeCheckout, verifyStripeSession } from '@/lib/stripe-checkout';
@@ -222,12 +222,7 @@ export default function BuyerQuotationDetailPage() {
 
     const [showCounterForm, setShowCounterForm] = useState(false);
     const [counterReductionPercent, setCounterReductionPercent] = useState(10);
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [hasUnread, setHasUnread] = useState(false);
 
-    const [messages, setMessages] = useState<any[]>([]);
-    const [newMessage, setNewMessage] = useState('');
-    const messagesEndRef = useRef<HTMLDivElement>(null);
     const canonicalStatus = deriveCanonicalWorkflowStatus({
         cartStatus: quotation?.intendedCart?.status || quotation?.cart?.status,
         latestQuotationStatus: quotation?.status,
@@ -237,8 +232,6 @@ export default function BuyerQuotationDetailPage() {
             totalAmount: order.totalAmount,
             paidAmount: order.paidAmount,
             opsFinalCheckStatus: order.opsFinalCheckStatus,
-            opsFinalCheckedAt: order.opsFinalCheckedAt,
-            opsFinalCheckReason: order.opsFinalCheckReason,
             paymentLinkSentAt: order.paymentLinkSentAt,
             paymentConfirmedAt: order.paymentConfirmedAt,
             forwardedToOpsAt: order.forwardedToOpsAt,
@@ -275,66 +268,6 @@ export default function BuyerQuotationDetailPage() {
         return byDate.find((p) => p.gatewayRef)?.gatewayRef || null;
     })();
     const showPaymentFailureNotice = Boolean(paymentNotice && paymentNotice.toLowerCase().includes('failed')) && !isOrderPaid;
-
-    const fetchMessages = useCallback(async () => {
-        const cartId = quotation?.intendedCart?.id || (quotation as any)?.cart?.id;
-        if (!cartId) return;
-        try {
-            const data = await api.getBuyerQuotationMessages(cartId);
-            const msgs = data as any[];
-            setMessages(msgs);
-
-            // Check for unread
-            if (!isChatOpen && msgs.length > 0) {
-                const lastSeen = localStorage.getItem(`buyer_chat_last_seen_${cartId}`);
-                const lastMsgTime = new Date(msgs[msgs.length - 1].createdAt).getTime();
-                if (!lastSeen || lastMsgTime > parseInt(lastSeen)) {
-                    setHasUnread(true);
-                }
-            }
-        } catch (err) {
-            console.error('Failed to load messages', err);
-        }
-    }, [quotation, isChatOpen]);
-
-    useEffect(() => {
-        const cartId = quotation?.intendedCart?.id || (quotation as any)?.cart?.id;
-        if (cartId) {
-            fetchMessages();
-            const interval = setInterval(fetchMessages, 10000);
-            return () => clearInterval(interval);
-        }
-    }, [quotation, fetchMessages]);
-
-    useEffect(() => {
-        const cartId = quotation?.intendedCart?.id || (quotation as any)?.cart?.id;
-        if (isChatOpen && messages.length > 0 && cartId) {
-            setHasUnread(false);
-            localStorage.setItem(`buyer_chat_last_seen_${cartId}`, new Date(messages[messages.length - 1].createdAt).getTime().toString());
-        }
-    }, [isChatOpen, messages, quotation]);
-
-    useEffect(() => {
-        if (messagesEndRef.current && isChatOpen) {
-            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-        }
-    }, [messages, isChatOpen]);
-
-    const handleSendMessage = async (e: React.FormEvent) => {
-        e.preventDefault();
-        const cartId = quotation?.intendedCart?.id || (quotation as any)?.cart?.id;
-        if (!newMessage.trim() || !cartId) return;
-
-        const content = newMessage.trim();
-        setNewMessage('');
-        try {
-            await api.sendBuyerQuotationMessage(cartId, content);
-            await fetchMessages();
-        } catch (err) {
-            alert('Failed to send message');
-            setNewMessage(content);
-        }
-    };
 
     const handleSaveCounter = async () => {
         if (!quotation) return;
