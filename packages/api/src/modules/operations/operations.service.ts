@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class OperationsService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(private readonly prisma: PrismaService) { }
 
     private asDecimal(v?: number | string | null) {
         return new Prisma.Decimal(Number(v || 0));
@@ -620,5 +620,611 @@ export class OperationsService {
             select: { id: true, email: true, firstName: true, lastName: true, companyName: true },
             orderBy: { createdAt: 'asc' },
         });
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.1 — Validation Page
+    // ════════════════════════════════════════════════════════════════
+
+    async getValidations(filters: {
+        status?: string;
+        riskFlag?: string;
+        page?: number;
+        limit?: number;
+        search?: string;
+    }) {
+        const page = Math.max(filters.page || 1, 1);
+        const limit = Math.min(Math.max(filters.limit || 20, 1), 100);
+        const skip = (page - 1) * limit;
+
+        const where: any = {};
+        if (filters.status) where.validationStatus = filters.status;
+        if (filters.riskFlag) where.riskFlags = { has: filters.riskFlag };
+        if (filters.search) {
+            where.OR = [
+                { recommendationItem: { inventorySku: { name: { contains: filters.search, mode: 'insensitive' } } } },
+                { recommendationItem: { manufacturerItem: { name: { contains: filters.search, mode: 'insensitive' } } } },
+            ];
+        }
+
+        const [items, total] = await Promise.all([
+            this.prisma.cartItem.findMany({
+                where,
+                include: {
+                    cart: { include: { user: { select: { id: true, email: true, firstName: true, lastName: true, companyName: true } } } },
+                    recommendationItem: { include: { inventorySku: true, manufacturerItem: true } },
+                    validatedBy: { select: { id: true, email: true, firstName: true, lastName: true } },
+                },
+                orderBy: { addedAt: 'desc' },
+                skip,
+                take: limit,
+            }),
+            this.prisma.cartItem.count({ where }),
+        ]);
+
+        return { items, total, page, limit, totalPages: Math.ceil(total / limit) };
+    }
+
+    async batchValidate(cartItemIds: string[], userId: string, action: 'approve' | 'reject') {
+        if (!cartItemIds?.length) throw new BadRequestException('No items provided');
+
+        const validationStatus = action === 'approve' ? 'approved' : 'rejected';
+
+        return this.prisma.$transaction(async (tx) => {
+            const items = await tx.cartItem.findMany({
+                where: { id: { in: cartItemIds } },
+                include: { recommendationItem: { include: { inventorySku: true, manufacturerItem: true } } },
+            });
+
+            for (const item of items) {
+                const riskFlags = this.detectRiskFlags(item);
+                await tx.cartItem.update({
+                    where: { id: item.id },
+                    data: {
+                        validationStatus: validationStatus,
+                        validatedAt: new Date(),
+                        validatedById: userId,
+                        riskFlags,
+                    } as any,
+                });
+
+                // Create audit log
+                await (tx as any).auditLog.create({
+                    data: {
+                        entityType: 'cart_item',
+                        entityId: item.id,
+                        action: `validation_${action}d`,
+                        details: { validationStatus, riskFlags } as any,
+                        performedBy: userId,
+                    },
+                });
+            }
+
+            return { updated: items.length, status: validationStatus };
+        });
+    }
+
+    detectRiskFlags(item: any): string[] {
+        const flags: string[] = [];
+
+        const sku = item.recommendationItem?.inventorySku;
+        const mfg = item.recommendationItem?.manufacturerItem;
+
+        // Stock mismatch
+        if (sku) {
+            if ((sku.availableQuantity ?? 0) < item.quantity) {
+                flags.push('STOCK_MISMATCH');
+            }
+        }
+
+        // MOQ violation
+        const moq = sku?.moq || mfg?.moq || 0;
+        if (moq > 0 && item.quantity < moq) {
+            flags.push('MOQ_VIOLATION');
+        }
+
+        // Lead time risk
+        const leadDays = sku?.leadTimeDays || mfg?.leadTimeDays || 0;
+        if (leadDays > 30) {
+            flags.push('LEAD_TIME_RISK');
+        }
+
+        // Pricing mismatch — if validated price deviates >30% from base
+        const baseCost = Number(sku?.baseCost || mfg?.baseCostMin || 0);
+        if (baseCost > 0 && item.validatedQuantity != null) {
+            // Price mismatch detection would need quoted price comparison
+            // Flagged if no base cost exists
+        }
+        if (!baseCost || baseCost <= 0) {
+            flags.push('NO_BASE_COST');
+        }
+
+        return flags;
+    }
+
+    async getAuditTrail(entityType: string, entityId: string) {
+        return (this.prisma as any).auditLog.findMany({
+            where: { entityType, entityId },
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+        });
+    }
+
+    async createAuditLog(data: { entityType: string; entityId: string; action: string; details?: any; performedBy: string }) {
+        return (this.prisma as any).auditLog.create({
+            data: {
+                entityType: data.entityType,
+                entityId: data.entityId,
+                action: data.action,
+                details: data.details || null,
+                performedBy: data.performedBy,
+            },
+        });
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.2 — Enhanced Dashboard
+    // ════════════════════════════════════════════════════════════════
+
+    async getEnhancedDashboard() {
+        const now = new Date();
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+        const [
+            totalOrders,
+            pendingOrders,
+            confirmedOrders,
+            shippedOrders,
+            deliveredOrders,
+            cancelledOrders,
+            newRequests,
+            underReviewRequests,
+            quotedRequests,
+            totalInventory,
+            pendingApproval,
+            recentValidations,
+            totalRevenue,
+            slaBreaches,
+        ] = await Promise.all([
+            this.prisma.order.count(),
+            this.prisma.order.count({ where: { status: 'pending_payment' } }),
+            this.prisma.order.count({ where: { status: 'confirmed' } }),
+            this.prisma.order.count({ where: { status: 'shipped' } }),
+            this.prisma.order.count({ where: { status: 'delivered' } }),
+            this.prisma.order.count({ where: { status: 'cancelled' } }),
+            this.prisma.intendedCart.count({ where: { status: 'submitted' } }),
+            this.prisma.intendedCart.count({ where: { status: 'under_review' } }),
+            this.prisma.intendedCart.count({ where: { status: 'quoted' } }),
+            this.prisma.inventorySku.count({ where: { isActive: true } }),
+            this.prisma.inventorySku.count({ where: { isActive: false } }),
+            // Recent validations for turnaround calculation
+            this.prisma.cartItem.findMany({
+                where: { validatedAt: { gte: sevenDaysAgo } },
+                select: { addedAt: true, validatedAt: true },
+            }),
+            // Revenue pipeline
+            this.prisma.order.aggregate({
+                _sum: { totalAmount: true },
+                where: { status: { not: 'cancelled' } },
+            }),
+            // SLA breaches: requests older than 48h still in submitted status
+            this.prisma.intendedCart.count({
+                where: {
+                    status: 'submitted',
+                    submittedAt: { lt: new Date(now.getTime() - 48 * 60 * 60 * 1000) },
+                },
+            }),
+        ]);
+
+        // Calculate avg turnaround (hours)
+        let avgTurnaroundHours = 0;
+        if (recentValidations.length > 0) {
+            const totalHours = recentValidations.reduce((sum, v) => {
+                if (!v.validatedAt) return sum;
+                return sum + (v.validatedAt.getTime() - v.addedAt.getTime()) / (1000 * 60 * 60);
+            }, 0);
+            avgTurnaroundHours = Math.round((totalHours / recentValidations.length) * 10) / 10;
+        }
+
+        // Validation trend (last 7 days)
+        const validationTrend: { date: string; count: number }[] = [];
+        for (let i = 6; i >= 0; i--) {
+            const dayStart = new Date(now);
+            dayStart.setDate(dayStart.getDate() - i);
+            dayStart.setHours(0, 0, 0, 0);
+            const dayEnd = new Date(dayStart);
+            dayEnd.setHours(23, 59, 59, 999);
+
+            const count = recentValidations.filter(
+                (v) => v.validatedAt && v.validatedAt >= dayStart && v.validatedAt <= dayEnd,
+            ).length;
+
+            validationTrend.push({
+                date: dayStart.toISOString().split('T')[0],
+                count,
+            });
+        }
+
+        return {
+            kpis: {
+                totalOrders,
+                revenuePipeline: Number(totalRevenue._sum.totalAmount || 0),
+                avgTurnaroundHours,
+                slaBreaches,
+                pendingValidations: newRequests,
+            },
+            orderPipeline: {
+                pending_payment: pendingOrders,
+                confirmed: confirmedOrders,
+                shipped: shippedOrders,
+                delivered: deliveredOrders,
+                cancelled: cancelledOrders,
+            },
+            requests: {
+                submitted: newRequests,
+                under_review: underReviewRequests,
+                quoted: quotedRequests,
+            },
+            inventory: {
+                total: totalInventory,
+                pendingApproval,
+            },
+            validationTrend,
+            lastUpdated: now.toISOString(),
+        };
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.3 — Validation Reports
+    // ════════════════════════════════════════════════════════════════
+
+    async generateReport(filters: {
+        dateFrom?: string;
+        dateTo?: string;
+        status?: string;
+        category?: string;
+        sourceType?: string;
+    }) {
+        const where: any = {};
+
+        if (filters.dateFrom || filters.dateTo) {
+            where.validatedAt = {};
+            if (filters.dateFrom) where.validatedAt.gte = new Date(filters.dateFrom);
+            if (filters.dateTo) where.validatedAt.lte = new Date(filters.dateTo);
+        }
+        if (filters.status) where.validationStatus = filters.status;
+        if (filters.category) {
+            where.recommendationItem = { inventorySku: { category: filters.category } };
+        }
+        if (filters.sourceType) where.availableSource = filters.sourceType;
+
+        const [items, totals, statusBreakdown] = await Promise.all([
+            this.prisma.cartItem.findMany({
+                where,
+                include: {
+                    cart: { include: { user: { select: { email: true, companyName: true } } } },
+                    recommendationItem: { include: { inventorySku: true, manufacturerItem: true } },
+                    validatedBy: { select: { email: true, firstName: true, lastName: true } },
+                },
+                orderBy: { validatedAt: 'desc' },
+                take: 500,
+            }),
+            this.prisma.cartItem.aggregate({
+                where,
+                _count: { _all: true },
+                _avg: { validatedQuantity: true },
+            }),
+            (this.prisma.cartItem.groupBy as any)({
+                by: ['validationStatus'],
+                where: { ...where, validatedAt: where.validatedAt || { not: null } },
+                _count: { _all: true },
+            }),
+        ]);
+
+        // Calculate avg turnaround
+        const validated = items.filter((i) => i.validatedAt);
+        let avgTurnaroundHours = 0;
+        if (validated.length > 0) {
+            const totalMs = validated.reduce(
+                (sum, v) => sum + (v.validatedAt!.getTime() - v.addedAt.getTime()),
+                0,
+            );
+            avgTurnaroundHours = Math.round((totalMs / validated.length / (1000 * 60 * 60)) * 10) / 10;
+        }
+
+        return {
+            items,
+            summary: {
+                totalItems: totals._count._all,
+                avgValidatedQuantity: Math.round(totals._avg.validatedQuantity || 0),
+                avgTurnaroundHours,
+                statusBreakdown: (statusBreakdown as any[]).map((s: any) => ({
+                    status: s.validationStatus,
+                    count: s._count?._all ?? 0,
+                })),
+            },
+        };
+    }
+
+    async exportReportCsv(filters: { dateFrom?: string; dateTo?: string; status?: string; category?: string; sourceType?: string }) {
+        const report = await this.generateReport(filters);
+
+        const headers = ['Item ID', 'Product', 'Category', 'Source', 'Qty', 'Available Qty', 'Status', 'Risk Flags', 'Validated By', 'Validated At', 'Buyer'];
+        const rows = report.items.map((item) => [
+            item.id,
+            item.recommendationItem?.inventorySku?.name || item.recommendationItem?.manufacturerItem?.name || 'N/A',
+            item.recommendationItem?.inventorySku?.category || item.recommendationItem?.manufacturerItem?.category || '',
+            item.availableSource || '',
+            item.quantity,
+            item.validatedQuantity ?? '',
+            (item as any).validationStatus,
+            ((item as any).riskFlags || []).join('; '),
+            item.validatedBy ? `${item.validatedBy.firstName || ''} ${item.validatedBy.lastName || ''}`.trim() : '',
+            item.validatedAt?.toISOString() || '',
+            item.cart?.user?.companyName || item.cart?.user?.email || '',
+        ]);
+
+        const csvContent = [headers, ...rows].map((row) => row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+        return { csv: csvContent, filename: `validation-report-${new Date().toISOString().split('T')[0]}.csv` };
+    }
+
+    // Report Templates CRUD
+    async listReportTemplates(userId: string) {
+        return (this.prisma as any).reportTemplate.findMany({
+            where: { OR: [{ createdBy: userId }, { isDefault: true }] },
+            orderBy: { updatedAt: 'desc' },
+        });
+    }
+
+    async saveReportTemplate(userId: string, data: { name: string; filters: any; isDefault?: boolean }) {
+        return (this.prisma as any).reportTemplate.create({
+            data: {
+                name: data.name,
+                filters: data.filters || {},
+                createdBy: userId,
+                isDefault: data.isDefault || false,
+            },
+        });
+    }
+
+    async deleteReportTemplate(id: string, userId: string) {
+        const template = await (this.prisma as any).reportTemplate.findUnique({ where: { id } });
+        if (!template || template.createdBy !== userId) throw new NotFoundException('Template not found');
+        return (this.prisma as any).reportTemplate.delete({ where: { id } });
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.4 — Sales Forwarding
+    // ════════════════════════════════════════════════════════════════
+
+    async autoAssignToSales(cartId: string, assignedByUserId?: string) {
+        // Get all active sales reps
+        const salesReps = await this.prisma.user.findMany({
+            where: { userType: 'sales', isActive: true },
+            select: { id: true, email: true, firstName: true, lastName: true },
+        });
+
+        if (salesReps.length === 0) throw new BadRequestException('No active sales reps available');
+
+        // Count open assignments per rep (carts not yet quoted/closed)
+        const workloads = await Promise.all(
+            salesReps.map(async (rep) => {
+                const count = await this.prisma.intendedCart.count({
+                    where: {
+                        assignedSalesId: rep.id,
+                        status: { in: ['submitted', 'under_review'] },
+                    },
+                });
+                return { rep, openAssignments: count };
+            }),
+        );
+
+        // Pick rep with lowest workload (round-robin + load balance)
+        workloads.sort((a, b) => a.openAssignments - b.openAssignments);
+        const chosen = workloads[0];
+
+        // Assign
+        const updated = await this.prisma.intendedCart.update({
+            where: { id: cartId },
+            data: {
+                assignedSalesId: chosen.rep.id,
+                assignedAt: new Date(),
+                status: 'under_review',
+            },
+            include: { assignedSales: true },
+        });
+
+        // Record assignment
+        await (this.prisma as any).salesAssignment.create({
+            data: {
+                salesPersonId: chosen.rep.id,
+                cartId,
+                assignedBy: assignedByUserId || null,
+            },
+        });
+
+        // Audit log
+        await this.createAuditLog({
+            entityType: 'cart',
+            entityId: cartId,
+            action: 'auto_assigned',
+            details: { salesPersonId: chosen.rep.id, workload: chosen.openAssignments },
+            performedBy: assignedByUserId || chosen.rep.id,
+        });
+
+        return updated;
+    }
+
+    async getSalesPerformance() {
+        const salesReps = await this.prisma.user.findMany({
+            where: { userType: 'sales', isActive: true },
+            select: { id: true, email: true, firstName: true, lastName: true },
+        });
+
+        const metrics = await Promise.all(
+            salesReps.map(async (rep) => {
+                const [assignedCount, quotedCount, convertedCount, commissions] = await Promise.all([
+                    this.prisma.intendedCart.count({ where: { assignedSalesId: rep.id } }),
+                    this.prisma.quotation.count({ where: { createdById: rep.id } }),
+                    this.prisma.order.count({ where: { salesPersonId: rep.id } }),
+                    this.prisma.commissionRecord.aggregate({
+                        where: { salesPersonId: rep.id },
+                        _sum: { amount: true },
+                    }),
+                ]);
+
+                const conversionRate = assignedCount > 0 ? Math.round((convertedCount / assignedCount) * 100) : 0;
+
+                return {
+                    ...rep,
+                    assignedCount,
+                    quotedCount,
+                    convertedCount,
+                    conversionRate,
+                    totalCommission: Number(commissions._sum.amount || 0),
+                };
+            }),
+        );
+
+        return metrics.sort((a, b) => b.conversionRate - a.conversionRate);
+    }
+
+    async getMonthlyCommissionReport(month?: string) {
+        const targetMonth = month || new Date().toISOString().slice(0, 7); // YYYY-MM
+        const startDate = new Date(`${targetMonth}-01T00:00:00Z`);
+        const endDate = new Date(startDate);
+        endDate.setMonth(endDate.getMonth() + 1);
+
+        const records = await this.prisma.commissionRecord.findMany({
+            where: { createdAt: { gte: startDate, lt: endDate } },
+            include: {
+                salesPerson: { select: { id: true, email: true, firstName: true, lastName: true } },
+                order: { select: { id: true, orderNumber: true, totalAmount: true, status: true } },
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+
+        const totalCommission = records.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+        const totalDelivered = records.reduce((sum, r) => sum + Number(r.deliveredValue || 0), 0);
+
+        return {
+            month: targetMonth,
+            records,
+            summary: {
+                totalRecords: records.length,
+                totalCommission: Math.round(totalCommission * 100) / 100,
+                totalDeliveredValue: Math.round(totalDelivered * 100) / 100,
+                paidCount: records.filter((r) => r.status === 'paid').length,
+                pendingCount: records.filter((r) => r.status === 'pending').length,
+            },
+        };
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.5 — Order Management & Fulfillment
+    // ════════════════════════════════════════════════════════════════
+
+    private static readonly VALID_TRANSITIONS: Record<string, string[]> = {
+        pending_payment: ['confirmed', 'cancelled'],
+        confirmed: ['in_procurement', 'processing', 'cancelled'],
+        in_procurement: ['processing', 'partially_shipped', 'shipped', 'cancelled'],
+        processing: ['partially_shipped', 'shipped', 'cancelled'],
+        partially_shipped: ['shipped', 'delivered'],
+        shipped: ['delivered', 'partially_delivered'],
+        partially_delivered: ['delivered'],
+    };
+
+    async transitionOrderState(orderId: string, newStatus: string, userId: string, notes?: string) {
+        const order = await this.prisma.order.findUnique({ where: { id: orderId } });
+        if (!order) throw new NotFoundException('Order not found');
+
+        const currentStatus = order.status || 'pending_payment';
+        const allowed = OperationsService.VALID_TRANSITIONS[currentStatus] || [];
+
+        if (!allowed.includes(newStatus)) {
+            throw new BadRequestException(
+                `Invalid transition: ${currentStatus} → ${newStatus}. Allowed: ${allowed.join(', ') || 'none'}`,
+            );
+        }
+
+        const updateData: any = { status: newStatus };
+
+        // Stock deduction on confirmation
+        if (newStatus === 'confirmed' && currentStatus === 'pending_payment') {
+            await this.deductInventory(orderId);
+        }
+
+        const updated = await this.prisma.order.update({
+            where: { id: orderId },
+            data: updateData,
+            include: { buyer: true, items: true, shipments: true },
+        });
+
+        // Audit log
+        await this.createAuditLog({
+            entityType: 'order',
+            entityId: orderId,
+            action: 'status_transition',
+            details: { from: currentStatus, to: newStatus, notes },
+            performedBy: userId,
+        });
+
+        return updated;
+    }
+
+    private async deductInventory(orderId: string) {
+        const orderItems = await this.prisma.orderItem.findMany({
+            where: { orderId },
+            include: {
+                quotationItem: {
+                    include: {
+                        cartItem: {
+                            include: {
+                                recommendationItem: {
+                                    include: { inventorySku: true },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+        for (const oi of orderItems) {
+            const sku = (oi as any).quotationItem?.cartItem?.recommendationItem?.inventorySku;
+            if (sku && sku.availableQuantity > 0) {
+                const deduction = Math.min(oi.quantity, sku.availableQuantity);
+                await this.prisma.inventorySku.update({
+                    where: { id: sku.id },
+                    data: { availableQuantity: { decrement: deduction } },
+                });
+            }
+        }
+    }
+
+    async getFulfillmentDashboard() {
+        const [orders, recentShipments, procurements] = await Promise.all([
+            this.prisma.order.groupBy({
+                by: ['status'],
+                _count: { _all: true },
+            }),
+            this.prisma.shipment.findMany({
+                orderBy: { createdAt: 'desc' },
+                take: 10,
+                include: { order: { select: { orderNumber: true } } },
+            }),
+            this.prisma.procurementRecord.findMany({
+                orderBy: { createdAt: 'desc' },
+                take: 10,
+                include: { order: { select: { orderNumber: true } }, supplier: true },
+            }),
+        ]);
+
+        return {
+            statusBreakdown: orders.map((o) => ({ status: o.status, count: o._count._all })),
+            recentShipments,
+            recentProcurements: procurements,
+        };
     }
 }

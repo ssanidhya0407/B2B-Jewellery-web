@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import * as path from 'path';
 
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
@@ -26,6 +27,11 @@ import configuration from './config/configuration';
         ConfigModule.forRoot({
             isGlobal: true,
             load: [configuration],
+            envFilePath: [
+                path.resolve(__dirname, '../../../.env'),
+                path.resolve(__dirname, '../../.env'),
+                '.env',
+            ],
         }),
         DatabaseModule,
         AuthModule,

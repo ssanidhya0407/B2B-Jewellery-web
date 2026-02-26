@@ -15,8 +15,10 @@ interface QuoteRequest {
     assignedSalesId?: string | null;
     assignedSales?: { id: string; email?: string } | null;
     notes?: string;
+    validatedAt?: string | null;
+    validatedByOps?: { firstName?: string; lastName?: string } | null;
     user: { id: string; email: string; companyName?: string; firstName?: string; lastName?: string };
-    items: Array<{ id: string }>;
+    items: Array<{ id: string; validationStatus?: string; riskFlags?: string[] }>;
     session?: { thumbnailUrl?: string };
     quotations?: Array<{ id: string; status: string }>;
     order?: {
@@ -381,6 +383,37 @@ export default function SalesRequestsPage() {
 
                                                 <StatusBadge status={canonical} label={canonicalStatusDisplayLabel(canonical)} />
                                             </div>
+
+                                            {/* Ops context: validation status + risk flags */}
+                                            {(() => {
+                                                const flags = new Set<string>();
+                                                let approvedCount = 0;
+                                                let totalItems = req.items.length;
+                                                req.items.forEach(item => {
+                                                    (item.riskFlags || []).forEach(f => flags.add(f));
+                                                    if (item.validationStatus === 'approved') approvedCount++;
+                                                });
+                                                const riskArr = Array.from(flags);
+                                                return (riskArr.length > 0 || approvedCount > 0 || req.validatedByOps) ? (
+                                                    <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                                        {approvedCount > 0 && (
+                                                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-md">
+                                                                ✓ {approvedCount}/{totalItems} validated
+                                                            </span>
+                                                        )}
+                                                        {req.validatedByOps && (
+                                                            <span className="text-[10px] font-medium text-primary-500">
+                                                                by {[req.validatedByOps.firstName, req.validatedByOps.lastName].filter(Boolean).join(' ')}
+                                                            </span>
+                                                        )}
+                                                        {riskArr.map(flag => (
+                                                            <span key={flag} className="text-[10px] font-semibold text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded-md">
+                                                                ⚠ {flag.replace(/_/g, ' ').toLowerCase()}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                ) : null;
+                                            })()}
 
                                             <div className="mt-6 grid grid-cols-2 gap-3">
                                                 <div className="p-3.5 bg-gray-50/50 rounded-[1.5rem] ring-1 ring-gray-100">
