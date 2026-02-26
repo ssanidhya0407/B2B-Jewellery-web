@@ -1,8 +1,16 @@
+import * as path from 'path';
+import { config } from 'dotenv';
+
+// Load .env from the monorepo root BEFORE NestJS bootstrap
+// so that process.env.DATABASE_URL is available when PrismaService is constructed
+config({ path: path.resolve(__dirname, '../../../.env') });
+config({ path: path.resolve(__dirname, '../../.env') });
+config(); // also try local .env
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
-import * as path from 'path';
 
 async function bootstrap() {
     const app = await NestFactory.create<NestExpressApplication>(AppModule);

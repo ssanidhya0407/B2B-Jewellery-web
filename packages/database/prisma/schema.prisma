@@ -33,6 +33,13 @@ enum JewelleryCategory {
   other
 }
 
+enum ValidationStatus {
+  pending
+  under_review
+  approved
+  rejected
+}
+
 model User {
   id             String   @id @default(uuid()) @db.Uuid
   email          String   @unique @db.VarChar(255)
@@ -326,9 +333,11 @@ model CartItem {
   inventoryStatus    String?   @map("inventory_status") @db.VarChar(30) // in_stock | low_stock | out_of_stock | available | made_to_order | unavailable
   availableSource    String?   @map("available_source") @db.VarChar(30) // internal | manufacturer | alibaba
   validatedQuantity  Int?      @map("validated_quantity")
-  operationsNotes    String?   @map("operations_notes")
-  validatedAt        DateTime? @map("validated_at")
-  validatedById      String?   @map("validated_by_id") @db.Uuid
+  operationsNotes    String?          @map("operations_notes")
+  validatedAt        DateTime?        @map("validated_at")
+  validatedById      String?          @map("validated_by_id") @db.Uuid
+  validationStatus   ValidationStatus @default(pending) @map("validation_status")
+  riskFlags          String[]         @default([]) @map("risk_flags")
 
   // Relations
   cart                  IntendedCart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
@@ -776,4 +785,53 @@ model Message {
   sender User         @relation(fields: [senderId], references: [id])
 
   @@map("messages")
+}
+
+// ============================================
+// AUDIT LOGS (Module 2.1)
+// ============================================
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  entityType  String   @map("entity_type") @db.VarChar(50)
+  entityId    String   @map("entity_id") @db.Uuid
+  action      String   @db.VarChar(50)
+  details     Json?    @db.JsonB
+  performedBy String   @map("performed_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@index([performedBy])
+  @@map("audit_logs")
+}
+
+// ============================================
+// REPORT TEMPLATES (Module 2.3)
+// ============================================
+
+model ReportTemplate {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(100)
+  filters   Json     @db.JsonB
+  createdBy String   @map("created_by") @db.Uuid
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("report_templates")
+}
+
+// ============================================
+// SALES ASSIGNMENTS (Module 2.4)
+// ============================================
+
+model SalesAssignment {
+  id            String   @id @default(uuid()) @db.Uuid
+  salesPersonId String   @map("sales_person_id") @db.Uuid
+  cartId        String   @map("cart_id") @db.Uuid
+  assignedAt    DateTime @default(now()) @map("assigned_at")
+  assignedBy    String?  @map("assigned_by") @db.Uuid
+
+  @@index([salesPersonId])
+  @@map("sales_assignments")
 }

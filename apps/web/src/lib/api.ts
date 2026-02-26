@@ -727,6 +727,116 @@ class ApiClient {
     }
 
     // ─── Quotation Tracker — Buyer ───────────────────────────────
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.1 — Validation Endpoints
+    // ════════════════════════════════════════════════════════════════
+
+    async getValidations(filters?: { status?: string; riskFlag?: string; page?: number; limit?: number; search?: string }) {
+        const params = new URLSearchParams();
+        if (filters?.status) params.set('status', filters.status);
+        if (filters?.riskFlag) params.set('riskFlag', filters.riskFlag);
+        if (filters?.page) params.set('page', String(filters.page));
+        if (filters?.limit) params.set('limit', String(filters.limit));
+        if (filters?.search) params.set('search', filters.search);
+        const query = params.toString() ? `?${params.toString()}` : '';
+        return this.request(`/operations/validations${query}`);
+    }
+
+    async batchValidate(cartItemIds: string[], action: 'approve' | 'reject') {
+        return this.request('/operations/validate/batch', { method: 'POST', body: { cartItemIds, action } });
+    }
+
+    async getAuditTrail(entityType: string, entityId: string) {
+        return this.request(`/operations/validation/${entityType}/${entityId}/audit`);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.2 — Enhanced Dashboard
+    // ════════════════════════════════════════════════════════════════
+
+    async getEnhancedDashboard() {
+        return this.request('/operations/dashboard/enhanced');
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.3 — Reports
+    // ════════════════════════════════════════════════════════════════
+
+    async getValidationReports(filters?: { dateFrom?: string; dateTo?: string; status?: string; category?: string; sourceType?: string }) {
+        const params = new URLSearchParams();
+        if (filters?.dateFrom) params.set('dateFrom', filters.dateFrom);
+        if (filters?.dateTo) params.set('dateTo', filters.dateTo);
+        if (filters?.status) params.set('status', filters.status);
+        if (filters?.category) params.set('category', filters.category);
+        if (filters?.sourceType) params.set('sourceType', filters.sourceType);
+        const query = params.toString() ? `?${params.toString()}` : '';
+        return this.request(`/operations/reports${query}`);
+    }
+
+    async exportReportCsv(filters?: { dateFrom?: string; dateTo?: string; status?: string; category?: string; sourceType?: string }) {
+        const params = new URLSearchParams();
+        if (filters?.dateFrom) params.set('dateFrom', filters.dateFrom);
+        if (filters?.dateTo) params.set('dateTo', filters.dateTo);
+        if (filters?.status) params.set('status', filters.status);
+        if (filters?.category) params.set('category', filters.category);
+        if (filters?.sourceType) params.set('sourceType', filters.sourceType);
+        const query = params.toString() ? `?${params.toString()}` : '';
+        // Using raw fetch for file download
+        const token = Cookies.get('accessToken');
+        const response = await fetch(`${this.baseUrl}/api/operations/reports/export${query}`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!response.ok) throw new Error('Export failed');
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `validation-report-${new Date().toISOString().split('T')[0]}.csv`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+    }
+
+    async getReportTemplates() {
+        return this.request('/operations/reports/templates');
+    }
+
+    async saveReportTemplate(data: { name: string; filters: any; isDefault?: boolean }) {
+        return this.request('/operations/reports/templates', { method: 'POST', body: data });
+    }
+
+    async deleteReportTemplate(id: string) {
+        return this.request(`/operations/reports/templates/${id}`, { method: 'DELETE' });
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.4 — Sales Forwarding
+    // ════════════════════════════════════════════════════════════════
+
+    async autoAssignToSales(cartId: string) {
+        return this.request('/operations/assign-auto', { method: 'POST', body: { cartId } });
+    }
+
+    async getSalesPerformance() {
+        return this.request('/operations/sales-performance');
+    }
+
+    async getCommissionReport(month?: string) {
+        const query = month ? `?month=${month}` : '';
+        return this.request(`/operations/commission-report${query}`);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.5 — Order State Machine & Fulfillment
+    // ════════════════════════════════════════════════════════════════
+
+    async transitionOrderState(orderId: string, status: string, notes?: string) {
+        return this.request(`/operations/orders/${orderId}/transition`, { method: 'POST', body: { status, notes } });
+    }
+
+    async getFulfillmentDashboard() {
+        return this.request('/operations/fulfillment-dashboard');
+    }
 }
 
 export const api = new ApiClient(API_URL);

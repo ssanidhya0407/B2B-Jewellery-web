@@ -96,6 +96,7 @@ export default function SalesDashboardPage() {
     const [metrics, setMetrics] = useState<SalesMetrics>({});
     const [assignedRequests, setAssignedRequests] = useState<AssignedRequest[]>([]);
     const [commissionReportRows, setCommissionReportRows] = useState<SalesCommissionRow[]>([]);
+    const [opsOrders, setOpsOrders] = useState<Array<{ id: string; orderNumber: string; status: string; totalAmount: number; forwardedToOpsAt?: string }>>([]);
     const [loading, setLoading] = useState(true);
     const [monthlyTarget, setMonthlyTarget] = useState(15000);
     const [isEditingTarget, setIsEditingTarget] = useState(false);
@@ -106,9 +107,11 @@ export default function SalesDashboardPage() {
             api.getSalesDashboard(),
             api.getAssignedRequests().catch(() => []),
             api.getCommissions().catch(() => ({ commissions: [] })),
+            api.getOpsOrders().catch(() => []),
         ])
-            .then(([dashboard, assigned, commissionReport]) => {
+            .then(([dashboard, assigned, commissionReport, opsFwd]) => {
                 setMetrics(dashboard as SalesMetrics);
+                setOpsOrders((opsFwd as any[]).filter((o: any) => o.forwardedToOpsAt));
                 const rows = ((commissionReport as SalesCommissionReport)?.commissions || []) as SalesCommissionRow[];
                 setCommissionReportRows(rows);
 
@@ -266,7 +269,7 @@ export default function SalesDashboardPage() {
                 ) : (
                     <div className="grid grid-cols-1 items-start gap-8 pb-20 lg:grid-cols-12">
                         <section className="flex flex-col gap-6 lg:col-span-8">
-                            <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                            <div className="grid grid-cols-1 gap-5 md:grid-cols-4">
                                 <article className="flex min-h-[180px] flex-col justify-between rounded-[2rem] border border-gray-100 bg-white p-6 shadow-[0_6px_22px_rgb(15,23,42,0.03)]">
                                     <div>
                                         <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-500/90">Pending action</p>
@@ -296,6 +299,17 @@ export default function SalesDashboardPage() {
                                         <p className="mt-2 text-xs font-medium text-gray-500">Closed won</p>
                                     </div>
                                     <p className="mt-4 text-xs font-bold uppercase tracking-[0.14em] text-emerald-700">Quote to order {conversionToOrder}%</p>
+                                </article>
+
+                                <article className="flex min-h-[180px] flex-col justify-between rounded-[2rem] border border-blue-100 bg-blue-50/30 p-6 shadow-[0_6px_22px_rgb(15,23,42,0.03)]">
+                                    <div>
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-blue-500/90">In Ops Pipeline</p>
+                                        <p className="mt-3 text-4xl font-bold tabular-nums text-gray-900">{opsOrders.filter(o => ['confirmed', 'in_procurement', 'processing'].includes(o.status)).length}</p>
+                                        <p className="mt-2 text-xs font-medium text-gray-500">Orders forwarded to ops</p>
+                                    </div>
+                                    <p className="mt-4 text-xs font-bold uppercase tracking-[0.14em] text-blue-700">
+                                        {opsOrders.filter(o => ['shipped', 'delivered', 'completed'].includes(o.status)).length} fulfilled
+                                    </p>
                                 </article>
                             </div>
 

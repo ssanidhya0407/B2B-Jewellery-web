@@ -139,19 +139,19 @@ function fmt(n: number) { return '₹' + n.toLocaleString('en-IN', { minimumFrac
 function fmtDec(n: number) { return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 const invStatusStyles: Record<string, { label: string; bg: string; color: string; icon: string }> = {
-    in_stock:       { label: 'In Stock',       bg: 'rgba(16,185,129,0.08)',  color: '#047857', icon: '✓' },
-    low_stock:      { label: 'Low Stock',      bg: 'rgba(245,158,11,0.08)',  color: '#b45309', icon: '⚠' },
-    out_of_stock:   { label: 'Out of Stock',   bg: 'rgba(239,68,68,0.08)',   color: '#b91c1c', icon: '✕' },
-    made_to_order:  { label: 'Made to Order',  bg: 'rgba(139,92,246,0.08)',  color: '#7c3aed', icon: '🔨' },
-    unavailable:    { label: 'Unavailable',    bg: 'rgba(239,68,68,0.08)',   color: '#b91c1c', icon: '✕' },
-    not_checked:    { label: 'Not Checked',    bg: 'rgba(16,42,67,0.04)',    color: '#64748b', icon: '○' },
+    in_stock: { label: 'In Stock', bg: 'rgba(16,185,129,0.08)', color: '#047857', icon: '✓' },
+    low_stock: { label: 'Low Stock', bg: 'rgba(245,158,11,0.08)', color: '#b45309', icon: '⚠' },
+    out_of_stock: { label: 'Out of Stock', bg: 'rgba(239,68,68,0.08)', color: '#b91c1c', icon: '✕' },
+    made_to_order: { label: 'Made to Order', bg: 'rgba(139,92,246,0.08)', color: '#7c3aed', icon: '🔨' },
+    unavailable: { label: 'Unavailable', bg: 'rgba(239,68,68,0.08)', color: '#b91c1c', icon: '✕' },
+    not_checked: { label: 'Not Checked', bg: 'rgba(16,42,67,0.04)', color: '#64748b', icon: '○' },
 };
 
 const cartStatusConfig: Record<string, { label: string; dot: string; bg: string; color: string }> = {
-    submitted:    { label: 'New',        dot: '#f59e0b', bg: 'rgba(245,158,11,0.06)', color: '#b45309' },
-    under_review: { label: 'Reviewing',  dot: '#3b82f6', bg: 'rgba(59,130,246,0.06)', color: '#1d4ed8' },
-    quoted:       { label: 'Quoted',     dot: '#10b981', bg: 'rgba(16,185,129,0.06)', color: '#047857' },
-    closed:       { label: 'Closed',     dot: '#94a3b8', bg: 'rgba(100,116,139,0.06)', color: '#475569' },
+    submitted: { label: 'New', dot: '#f59e0b', bg: 'rgba(245,158,11,0.06)', color: '#b45309' },
+    under_review: { label: 'Reviewing', dot: '#3b82f6', bg: 'rgba(59,130,246,0.06)', color: '#1d4ed8' },
+    quoted: { label: 'Quoted', dot: '#10b981', bg: 'rgba(16,185,129,0.06)', color: '#047857' },
+    closed: { label: 'Closed', dot: '#94a3b8', bg: 'rgba(100,116,139,0.06)', color: '#475569' },
 };
 
 /* ═══════ Validation Report Item Card ═══════ */
@@ -313,6 +313,13 @@ export default function OpsRequestDetailPage() {
     const [relatedOrder, setRelatedOrder] = useState<RelatedOrder | null>(null);
     const [finalCheckUpdating, setFinalCheckUpdating] = useState(false);
 
+    // Auto-assign
+    const [autoAssigning, setAutoAssigning] = useState(false);
+
+    // Audit trail
+    const [auditTrail, setAuditTrail] = useState<Array<{ id: string; action: string; entityType: string; details?: Record<string, unknown>; performedBy: string; performedByUser?: { firstName?: string; lastName?: string; email?: string }; createdAt: string }>>([]);
+    const [showAudit, setShowAudit] = useState(false);
+
     const loadRequest = useCallback(async () => {
         try {
             const data = await api.getQuoteRequest(cartId) as RequestDetail;
@@ -394,6 +401,26 @@ export default function OpsRequestDetailPage() {
         } finally {
             setStatusUpdating(false);
         }
+    };
+
+    const handleAutoAssign = async () => {
+        setAutoAssigning(true);
+        try {
+            await api.autoAssignToSales(cartId);
+            await loadRequest();
+        } catch (err) {
+            alert(err instanceof Error ? err.message : 'Auto-assign failed');
+        } finally {
+            setAutoAssigning(false);
+        }
+    };
+
+    const loadAuditTrail = async () => {
+        try {
+            const trail = await api.getAuditTrail('cart', cartId) as typeof auditTrail;
+            setAuditTrail(trail);
+            setShowAudit(true);
+        } catch { /* ignore */ }
     };
 
     const handleApproveFinalCheck = async () => {
@@ -600,7 +627,7 @@ export default function OpsRequestDetailPage() {
                     {/* ════════════════════════════════════════════
                         FULL VALIDATION REPORT
                     ════════════════════════════════════════════ */}
-                    {showReport && vr && (
+                    {showReport && vr && vr.summary && vr.report && (
                         <div className="space-y-5">
                             {/* ── Executive Summary ── */}
                             <div className="bg-white rounded-2xl border border-primary-100/60 p-5">
@@ -808,11 +835,17 @@ export default function OpsRequestDetailPage() {
                         <div className="bg-white rounded-2xl border-2 border-blue-100 p-5">
                             <h3 className="text-xs font-semibold text-blue-700 uppercase tracking-wider mb-3">🚀 Forward to Sales</h3>
                             {!showForwardPanel ? (
-                                <button onClick={() => { setShowForwardPanel(true); loadSalesTeam(); }}
-                                    className="w-full py-2.5 rounded-xl text-sm font-semibold text-white transition-all"
-                                    style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}>
-                                    Assign to Sales Person
-                                </button>
+                                <div className="space-y-2">
+                                    <button onClick={() => { setShowForwardPanel(true); loadSalesTeam(); }}
+                                        className="w-full py-2.5 rounded-xl text-sm font-semibold text-white transition-all"
+                                        style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)' }}>
+                                        Assign to Sales Person
+                                    </button>
+                                    <button onClick={handleAutoAssign} disabled={autoAssigning}
+                                        className="w-full py-2.5 rounded-xl text-sm font-semibold border-2 border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-all disabled:opacity-50">
+                                        {autoAssigning ? 'Assigning…' : '⚡ Auto-Assign (Round Robin)'}
+                                    </button>
+                                </div>
                             ) : (
                                 <div className="space-y-3">
                                     <select value={selectedSalesId} onChange={(e) => setSelectedSalesId(e.target.value)}
@@ -859,6 +892,40 @@ export default function OpsRequestDetailPage() {
                                 );
                             })}
                         </div>
+                    </div>
+
+                    {/* Audit Trail */}
+                    <div className="bg-white rounded-2xl border border-primary-100/60 p-5">
+                        <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-[10px] font-semibold text-primary-400 uppercase tracking-wider">Audit Trail</h3>
+                            <button onClick={loadAuditTrail} className="text-[10px] font-semibold text-blue-600 hover:underline">
+                                {showAudit ? 'Refresh' : 'Load'}
+                            </button>
+                        </div>
+                        {showAudit && auditTrail.length > 0 ? (
+                            <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                                {auditTrail.map(entry => (
+                                    <div key={entry.id} className="p-2.5 rounded-lg bg-primary-50/50 border border-primary-100/40">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[11px] font-bold text-primary-700 capitalize">{entry.action.replace(/_/g, ' ')}</span>
+                                            <span className="text-[10px] text-primary-400">{new Date(entry.createdAt).toLocaleString()}</span>
+                                        </div>
+                                        <p className="text-[10px] text-primary-500 mt-0.5">
+                                            {entry.performedByUser ? [entry.performedByUser.firstName, entry.performedByUser.lastName].filter(Boolean).join(' ') || entry.performedByUser.email : entry.performedBy.slice(0, 8)}
+                                        </p>
+                                        {entry.details && Object.keys(entry.details).length > 0 && (
+                                            <p className="text-[10px] text-primary-400 mt-0.5">
+                                                {Object.entries(entry.details).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+                                            </p>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : showAudit ? (
+                            <p className="text-xs text-primary-400">No audit entries yet</p>
+                        ) : (
+                            <p className="text-xs text-primary-400">Click Load to view audit history</p>
+                        )}
                     </div>
 
                     {request.session?.thumbnailUrl && (

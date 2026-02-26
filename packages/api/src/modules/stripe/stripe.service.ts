@@ -4,14 +4,22 @@ import Stripe from 'stripe';
 
 @Injectable()
 export class StripeService {
-    private stripe: Stripe;
+    private stripe: Stripe | null = null;
 
     constructor(private configService: ConfigService) {
         const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
         if (!secretKey) {
             console.warn('⚠️  STRIPE_SECRET_KEY is not set – Stripe endpoints will fail.');
+        } else {
+            this.stripe = new Stripe(secretKey, { apiVersion: '2025-04-30.basil' as any });
         }
-        this.stripe = new Stripe(secretKey || '', { apiVersion: '2025-04-30.basil' as any });
+    }
+
+    private getStripe(): Stripe {
+        if (!this.stripe) {
+            throw new BadRequestException('Stripe is not configured. Set STRIPE_SECRET_KEY in your .env file.');
+        }
+        return this.stripe;
     }
 
     async createCheckoutSession(input: {
@@ -25,7 +33,7 @@ export class StripeService {
             throw new BadRequestException('Amount must be greater than 0');
         }
 
-        const session = await this.stripe.checkout.sessions.create({
+        const session = await this.getStripe().checkout.sessions.create({
             payment_method_types: ['card'],
             mode: 'payment',
             customer_email: input.customerEmail || undefined,
@@ -56,7 +64,7 @@ export class StripeService {
     }
 
     async verifySession(sessionId: string) {
-        const session = await this.stripe.checkout.sessions.retrieve(sessionId);
+        const session = await this.getStripe().checkout.sessions.retrieve(sessionId);
 
         const paid =
             session.payment_status === 'paid' ||

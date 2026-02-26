@@ -1,11 +1,12 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Put, Query, Res, Header } from '@nestjs/common';
 import { User } from '@prisma/client';
 import { CurrentUser } from '../../common/decorators';
 import { OperationsService } from './operations.service';
+import { Response } from 'express';
 
 @Controller('operations')
 export class OperationsController {
-    constructor(private readonly operationsService: OperationsService) {}
+    constructor(private readonly operationsService: OperationsService) { }
 
     @Get('dashboard') getDashboard() { return this.operationsService.getDashboard(); }
     @Get('health') getHealth() { return this.operationsService.getHealth(); }
@@ -133,5 +134,130 @@ export class OperationsController {
 
     @Get('sales-team') getSalesTeam() {
         return this.operationsService.getSalesTeam();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.1 — Validation Endpoints
+    // ════════════════════════════════════════════════════════════════
+
+    @Get('validations')
+    getValidations(
+        @Query('status') status?: string,
+        @Query('riskFlag') riskFlag?: string,
+        @Query('page') page?: string,
+        @Query('limit') limit?: string,
+        @Query('search') search?: string,
+    ) {
+        return this.operationsService.getValidations({
+            status,
+            riskFlag,
+            page: page ? parseInt(page) : undefined,
+            limit: limit ? parseInt(limit) : undefined,
+            search,
+        });
+    }
+
+    @Post('validate/batch')
+    batchValidate(
+        @CurrentUser() user: User,
+        @Body() body: { cartItemIds: string[]; action: 'approve' | 'reject' },
+    ) {
+        return this.operationsService.batchValidate(body.cartItemIds, user.id, body.action);
+    }
+
+    @Get('validation/:entityType/:entityId/audit')
+    getAuditTrail(@Param('entityType') entityType: string, @Param('entityId') entityId: string) {
+        return this.operationsService.getAuditTrail(entityType, entityId);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.2 — Enhanced Dashboard
+    // ════════════════════════════════════════════════════════════════
+
+    @Get('dashboard/enhanced')
+    getEnhancedDashboard() {
+        return this.operationsService.getEnhancedDashboard();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.3 — Reports
+    // ════════════════════════════════════════════════════════════════
+
+    @Get('reports')
+    getReports(
+        @Query('dateFrom') dateFrom?: string,
+        @Query('dateTo') dateTo?: string,
+        @Query('status') status?: string,
+        @Query('category') category?: string,
+        @Query('sourceType') sourceType?: string,
+    ) {
+        return this.operationsService.generateReport({ dateFrom, dateTo, status, category, sourceType });
+    }
+
+    @Get('reports/export')
+    async exportReport(
+        @Res() res: Response,
+        @Query('dateFrom') dateFrom?: string,
+        @Query('dateTo') dateTo?: string,
+        @Query('status') status?: string,
+        @Query('category') category?: string,
+        @Query('sourceType') sourceType?: string,
+    ) {
+        const result = await this.operationsService.exportReportCsv({ dateFrom, dateTo, status, category, sourceType });
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+        res.send(result.csv);
+    }
+
+    @Get('reports/templates')
+    listReportTemplates(@CurrentUser() user: User) {
+        return this.operationsService.listReportTemplates(user.id);
+    }
+
+    @Post('reports/templates')
+    saveReportTemplate(@CurrentUser() user: User, @Body() body: { name: string; filters: any; isDefault?: boolean }) {
+        return this.operationsService.saveReportTemplate(user.id, body);
+    }
+
+    @Delete('reports/templates/:id')
+    deleteReportTemplate(@Param('id') id: string, @CurrentUser() user: User) {
+        return this.operationsService.deleteReportTemplate(id, user.id);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.4 — Sales Forwarding
+    // ════════════════════════════════════════════════════════════════
+
+    @Post('assign-auto')
+    autoAssign(@CurrentUser() user: User, @Body('cartId') cartId: string) {
+        return this.operationsService.autoAssignToSales(cartId, user.id);
+    }
+
+    @Get('sales-performance')
+    getSalesPerformance() {
+        return this.operationsService.getSalesPerformance();
+    }
+
+    @Get('commission-report')
+    getCommissionReport(@Query('month') month?: string) {
+        return this.operationsService.getMonthlyCommissionReport(month);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MODULE 2.5 — Order State Machine & Fulfillment
+    // ════════════════════════════════════════════════════════════════
+
+    @Post('orders/:id/transition')
+    transitionOrder(
+        @Param('id') id: string,
+        @CurrentUser() user: User,
+        @Body() body: { status: string; notes?: string },
+    ) {
+        return this.operationsService.transitionOrderState(id, body.status, user.id, body.notes);
+    }
+
+    @Get('fulfillment-dashboard')
+    getFulfillmentDashboard() {
+        return this.operationsService.getFulfillmentDashboard();
     }
 }
