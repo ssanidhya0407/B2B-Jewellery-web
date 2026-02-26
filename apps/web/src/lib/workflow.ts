@@ -22,13 +22,14 @@ type WorkflowPayment = {
 type WorkflowOrder = {
     id?: string;
     status?: string | null;
-    totalAmount?: number | null;
-    paidAmount?: number | null;
+    totalAmount?: number | string | null;
+    paidAmount?: number | string | null;
     payments?: WorkflowPayment[] | null;
     paymentLinkSentAt?: string | null;
     paymentConfirmedAt?: string | null;
     forwardedToOpsAt?: string | null;
     opsFinalCheckStatus?: string | null;
+    opsFinalCheckedAt?: string | null;
 };
 
 type WorkflowInput = {
@@ -147,13 +148,15 @@ export function canUseNegotiationChat(status: CanonicalWorkflowStatus): boolean 
     return status === 'QUOTED' || status === 'COUNTER';
 }
 
-export function latestQuotationForThread<T extends Record<string, unknown>>(
+export function latestQuotationForThread<T>(
     quotations?: T[] | null,
 ): T | null {
     if (!Array.isArray(quotations) || quotations.length === 0) return null;
     const sorted = [...quotations].sort((a, b) => {
-        const aTs = new Date(String(a.updatedAt || a.sentAt || a.createdAt || 0)).getTime();
-        const bTs = new Date(String(b.updatedAt || b.sentAt || b.createdAt || 0)).getTime();
+        const aAny = a as { updatedAt?: string; sentAt?: string; createdAt?: string };
+        const bAny = b as { updatedAt?: string; sentAt?: string; createdAt?: string };
+        const aTs = new Date(String(aAny.updatedAt || aAny.sentAt || aAny.createdAt || 0)).getTime();
+        const bTs = new Date(String(bAny.updatedAt || bAny.sentAt || bAny.createdAt || 0)).getTime();
         return bTs - aTs;
     });
     return sorted[0] || null;

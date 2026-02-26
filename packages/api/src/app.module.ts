@@ -17,6 +17,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { OrdersModule } from './modules/orders/orders.module';
 import { NegotiationsModule } from './modules/negotiations/negotiations.module';
 import { CommissionsModule } from './modules/commissions/commissions.module';
+import { StripeModule } from './modules/stripe/stripe.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import configuration from './config/configuration';
 
@@ -41,6 +42,7 @@ import configuration from './config/configuration';
         OrdersModule,
         NegotiationsModule,
         CommissionsModule,
+        StripeModule,
     ],
     providers: [
         {

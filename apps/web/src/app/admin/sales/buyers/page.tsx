@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { api } from '@/lib/api';
+import { api } from '../../../../lib/api';
 import { Users, ShoppingCart, Building2 } from 'lucide-react';
 
 interface Buyer {
