@@ -59,6 +59,7 @@ hash_passwords.js
 check_*.ts
 test_*.ts
 test-*.jpg
+scripts/reseed-workflow-fast.mjs
 
 # Debug and process logs
 *.log
