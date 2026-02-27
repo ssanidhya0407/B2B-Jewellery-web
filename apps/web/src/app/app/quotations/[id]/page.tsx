@@ -92,11 +92,22 @@ function getItemImage(item: QuotationItem): string | null {
 }
 function fmt(n: number) { return '₹' + Math.round(n || 0).toLocaleString('en-IN'); }
 function round2(n: number) { return Math.round((n + Number.EPSILON) * 100) / 100; }
-function clampCounterReduction(value: number) {
-    if (!Number.isFinite(value)) return 0;
-    return Math.min(15, Math.max(0, round2(value)));
+function parseTerms(raw?: string | null) {
+    const lines = String(raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    const system = lines.filter((l) => l.startsWith('[System]'));
+    const userTerms = lines.filter((l) => !l.startsWith('[System]'));
+    const badges: string[] = [];
+    system.forEach((line) => {
+        const normalized = line.toLowerCase();
+        if (normalized.includes('auto initial quote')) badges.push('Initial quote offered');
+        else if (normalized.includes('reminder at')) badges.push('Decision reminder scheduled');
+        else if (normalized.includes('expiry_extended')) badges.push('Expiry extended');
+    });
+    return {
+        userTerms: userTerms.join('\n'),
+        badges: Array.from(new Set(badges)),
+    };
 }
-
 /* ═══════ Page ═══════ */
 export default function BuyerQuotationDetailPage() {
     const params = useParams();
@@ -120,6 +131,11 @@ export default function BuyerQuotationDetailPage() {
     const [payRef, setPayRef] = useState('');
     const [paying, setPaying] = useState(false);
     const [paymentNotice, setPaymentNotice] = useState<string | null>(null);
+    const [showInlineChat, setShowInlineChat] = useState(false);
+    const [chatMessages, setChatMessages] = useState<any[]>([]);
+    const [chatInput, setChatInput] = useState('');
+    const [chatBusy, setChatBusy] = useState(false);
+    const chatEndRef = useRef<HTMLDivElement>(null);
 
     const loadQuotation = useCallback(async () => {
         try {
@@ -220,9 +236,6 @@ export default function BuyerQuotationDetailPage() {
         runStripeReconcile();
     }, [quotationId, loadQuotation]);
 
-    const [showCounterForm, setShowCounterForm] = useState(false);
-    const [counterReductionPercent, setCounterReductionPercent] = useState(10);
-
     const canonicalStatus = deriveCanonicalWorkflowStatus({
         cartStatus: quotation?.intendedCart?.status || quotation?.cart?.status,
         latestQuotationStatus: quotation?.status,
@@ -240,7 +253,6 @@ export default function BuyerQuotationDetailPage() {
     const normalizedQuoteStatus = (quotation?.status || '').toLowerCase();
     const isChatExplicitlyLocked =
         canonicalStatus === 'FINAL' ||
-        canonicalStatus === 'ACCEPTED_PENDING_OPS_RECHECK' ||
         canonicalStatus === 'ACCEPTED_PAYMENT_PENDING' ||
         canonicalStatus === 'PAYMENT_LINK_SENT' ||
         canonicalStatus === 'PAID_CONFIRMED' ||
@@ -268,33 +280,35 @@ export default function BuyerQuotationDetailPage() {
         return byDate.find((p) => p.gatewayRef)?.gatewayRef || null;
     })();
     const showPaymentFailureNotice = Boolean(paymentNotice && paymentNotice.toLowerCase().includes('failed')) && !isOrderPaid;
+    const cartId = quotation?.intendedCart?.id || quotation?.cart?.id;
+    const parsedTerms = parseTerms(quotation?.terms);
 
-    const handleSaveCounter = async () => {
-        if (!quotation) return;
-        if (counterReductionPercent < 0 || counterReductionPercent > 15) {
-            alert('Counter reduction must be between 0% and 15%.');
+    const loadChatMessages = useCallback(async () => {
+        if (!cartId) return;
+        try {
+            const data = await api.getBuyerQuotationMessages(cartId);
+            setChatMessages((data as any[]) || []);
+        } catch {
+            setChatMessages([]);
+        }
+    }, [cartId]);
+
+    useEffect(() => {
+        if (!canShowNegotiationChat) {
+            setShowInlineChat(false);
             return;
         }
-        setActionLoading(true);
+        if (!showInlineChat) return;
+        loadChatMessages();
+        const interval = setInterval(loadChatMessages, 5000);
+        return () => clearInterval(interval);
+    }, [canShowNegotiationChat, showInlineChat, loadChatMessages]);
 
-        const items = quotation.items.map(item => ({
-            cartItemId: item.cartItemId,
-            finalUnitPrice: round2(Number(item.finalUnitPrice || item.unitPrice || 0) * (1 - (counterReductionPercent / 100)))
-        }));
-
-        try {
-            const newQuote = await api.counterQuotation(quotationId, items) as { id: string };
-            setShowCounterForm(false);
-            setCounterReductionPercent(10);
-            const nextId = newQuote?.id || quotationId;
-            // Force route refresh so status chip and action-gating update immediately after counter submit.
-            window.location.assign(`/app/quotations/${nextId}`);
-        } catch (err) {
-            alert(err instanceof Error ? err.message : 'Failed to submit counter offer');
-        } finally {
-            setActionLoading(false);
+    useEffect(() => {
+        if (showInlineChat && chatEndRef.current) {
+            chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
         }
-    };
+    }, [showInlineChat, chatMessages]);
 
     const handleAccept = async () => {
         if (!confirm('Accept this quotation? An order will be created and you will proceed to payment.')) return;
@@ -321,6 +335,19 @@ export default function BuyerQuotationDetailPage() {
             alert(err instanceof Error ? err.message : 'Failed to reject');
         } finally {
             setActionLoading(false);
+        }
+    };
+
+    const handleSendBuyerChat = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!cartId || !chatInput.trim()) return;
+        setChatBusy(true);
+        try {
+            await api.sendBuyerQuotationMessage(cartId, chatInput.trim());
+            setChatInput('');
+            await loadChatMessages();
+        } finally {
+            setChatBusy(false);
         }
     };
 
@@ -359,12 +386,7 @@ export default function BuyerQuotationDetailPage() {
     const isFinalOffer = canonicalStatus === 'FINAL';
     const initialTotal = Number(quotation.quotedTotal || 0);
 
-    const customTotal = showCounterForm
-        ? quotation.items.reduce((sum, item) => {
-            const currentPrice = round2(Number(item.finalUnitPrice || item.unitPrice || 0) * (1 - (counterReductionPercent / 100)));
-            return sum + (isNaN(currentPrice) ? 0 : currentPrice) * item.quantity;
-        }, 0)
-        : initialTotal;
+    const customTotal = initialTotal;
 
     const salesName = quotation.createdBy ? [quotation.createdBy.firstName, quotation.createdBy.lastName].filter(Boolean).join(' ') || quotation.createdBy.email : null;
 
@@ -441,7 +463,7 @@ export default function BuyerQuotationDetailPage() {
                     {offerIterations.map((it, idx) => {
                         const isLatest = idx === offerIterations.length - 1;
                         const iterationCanonical = deriveCanonicalWorkflowStatus({ latestQuotationStatus: it.status });
-                        const type = idx === 0 ? 'Initial' : iterationCanonical === 'COUNTER' ? 'Counter' : iterationCanonical === 'FINAL' ? 'Final' : isLatest ? 'Final' : 'Counter';
+                        const type = idx === 0 ? 'Initial' : 'Final';
                         return (
                             <div key={it.id} className={`p-3 rounded-xl border flex items-center justify-between ${isLatest ? 'bg-indigo-50/60 border-indigo-200' : 'bg-primary-50/40 border-primary-100/60'}`}>
                                 <div>
@@ -481,19 +503,8 @@ export default function BuyerQuotationDetailPage() {
                                     )}
                                 </div>
                                 <div className="text-right shrink-0">
-                                    {showCounterForm ? (
-                                        <div className="text-right">
-                                            <p className="text-[11px] text-primary-400 line-through">{fmt(unitPrice)}</p>
-                                            <p className="text-sm font-bold text-primary-900">
-                                                {fmt(round2(unitPrice * (1 - (counterReductionPercent / 100))))}
-                                            </p>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            <p className="text-sm text-primary-500">{qty} × {fmt(unitPrice)}</p>
-                                            <p className="text-sm font-bold text-primary-900">{fmt(lineTotal)}</p>
-                                        </>
-                                    )}
+                                    <p className="text-sm text-primary-500">{qty} × {fmt(unitPrice)}</p>
+                                    <p className="text-sm font-bold text-primary-900">{fmt(lineTotal)}</p>
                                 </div>
                             </div>
                         );
@@ -507,10 +518,21 @@ export default function BuyerQuotationDetailPage() {
             </div>
 
             {/* Terms */}
-            {quotation.terms && (
+            {(parsedTerms.userTerms || parsedTerms.badges.length > 0) && (
                 <div className="bg-white rounded-2xl border border-primary-100 p-5 mb-6">
                     <h3 className="text-xs font-semibold text-primary-400 uppercase tracking-wider mb-2">Terms & Conditions</h3>
-                    <p className="text-sm text-primary-700 leading-relaxed whitespace-pre-wrap">{quotation.terms}</p>
+                    {parsedTerms.badges.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-3">
+                            {parsedTerms.badges.map((badge) => (
+                                <span key={badge} className="inline-flex px-2.5 py-1 rounded-full text-[11px] font-semibold bg-primary-50 text-primary-700 border border-primary-100">
+                                    {badge}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                    {parsedTerms.userTerms && (
+                        <p className="text-sm text-primary-700 leading-relaxed whitespace-pre-wrap">{parsedTerms.userTerms}</p>
+                    )}
                 </div>
             )}
 
@@ -528,10 +550,13 @@ export default function BuyerQuotationDetailPage() {
                         <div className="flex gap-4">
                             {canonicalStatus === 'QUOTED' && (
                                 <button
-                                    onClick={() => setShowCounterForm(!showCounterForm)}
-                                    className={`px-6 py-3 font-semibold rounded-xl transition-colors text-sm border-2 ${showCounterForm ? 'bg-primary-900 text-white' : 'text-primary-700 bg-white border-primary-100 hover:border-primary-300'}`}
+                                    onClick={async () => {
+                                        setShowInlineChat((v) => !v);
+                                        if (!showInlineChat) await loadChatMessages();
+                                    }}
+                                    className="px-4 py-2 text-xs rounded-xl bg-primary-50 text-primary-700 border border-primary-100 font-semibold"
                                 >
-                                    Counter Offer
+                                    {showInlineChat ? 'Hide Negotiation Chat' : 'Negotiate'}
                                 </button>
                             )}
                             <button onClick={handleAccept} disabled={actionLoading} className="px-8 py-3 bg-[#0F172A] text-white font-bold rounded-xl hover:bg-black transition-colors shadow-lg shadow-primary-900/20 disabled:opacity-50">
@@ -543,83 +568,87 @@ export default function BuyerQuotationDetailPage() {
                     {isFinalOffer && (
                         <div className="bg-amber-50 rounded-2xl mt-6 border border-amber-100 p-6 text-center">
                             <p className="text-amber-800 font-bold mb-1">Final Price Set</p>
-                            <p className="text-sm text-amber-600/80">The sales team has provided their final offer based on your counter. You may now accept or decline.</p>
+                            <p className="text-sm text-amber-600/80">The sales team has provided their final offer. You may now accept or decline.</p>
                         </div>
                     )}
                 </div>
             )}
 
-            {/* Counter Offer Form */}
-            {showCounterForm && canonicalStatus === 'QUOTED' && (
-                <div className="bg-white rounded-2xl border border-amber-100 p-6 mb-6">
-                    <h3 className="text-sm font-semibold text-primary-900 mb-3">Submit Counter Offer</h3>
-                    <p className="text-sm text-primary-500 mb-5">
-                        Use the slider to set your counter reduction against the current quoted value.
-                        Recommended reduction is 10%. Maximum allowed is 15%.
-                    </p>
-                    <div className="rounded-xl border border-primary-100 p-4 mb-4 bg-primary-50/40">
-                        <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs font-semibold text-primary-500 uppercase tracking-wide">Counter Reduction</span>
-                            <div className="flex items-center gap-1">
-                                <input
-                                    type="number"
-                                    min={0}
-                                    max={15}
-                                    step={0.1}
-                                    value={counterReductionPercent}
-                                    onChange={(e) => setCounterReductionPercent(clampCounterReduction(Number(e.target.value)))}
-                                    className="w-20 px-2 py-1 rounded-lg border border-primary-200 text-sm text-right font-bold text-primary-900"
-                                />
-                                <span className="text-sm font-bold text-primary-900">%</span>
-                            </div>
+            {canShowNegotiationChat && showInlineChat && (
+                <div className="bg-white rounded-2xl border border-primary-100 p-5 mb-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <div>
+                            <h3 className="text-sm font-semibold text-primary-900">Negotiation Chat</h3>
+                            <p className="text-xs text-primary-500 mt-1">
+                                {quotation.quotationNumber || `Quotation #${quotation.id.slice(0, 8)}`} • {salesName ? `Sales: ${salesName}` : 'Sales team'}
+                            </p>
                         </div>
+                    </div>
+                    <div className="h-72 overflow-y-auto rounded-xl border border-primary-50 bg-slate-50/60 p-4 space-y-3">
+                        {chatMessages.length === 0 ? (
+                            <p className="text-xs text-primary-400 text-center mt-20">Start negotiation with the sales team.</p>
+                        ) : (
+                            chatMessages.map((msg: any) => {
+                                const isSystem = String(msg.content || '').startsWith('[System]');
+                                const isBuyer = String(msg.sender?.userType || '').toLowerCase() === 'external';
+                                if (isSystem) {
+                                    const raw = String(msg.content).replace('[System]', '').trim();
+                                    const normalized = raw.toLowerCase();
+                                    let centerText = raw;
+                                    if (normalized.includes('auto initial quote')) centerText = 'Initial quote offered';
+                                    else if (normalized.includes('expiry_extended')) centerText = 'Expiry extended';
+                                    else if (normalized.includes('final quotation')) centerText = 'Final offer offered';
+                                    return (
+                                        <div key={msg.id} className="text-center">
+                                            <span className="inline-flex px-3 py-1 rounded-full text-[10px] font-semibold bg-white border border-primary-100 text-primary-500">
+                                                {centerText}
+                                            </span>
+                                        </div>
+                                    );
+                                }
+                                return (
+                                    <div key={msg.id} className={`flex ${isBuyer ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-[82%] px-3 py-2 rounded-xl text-xs ${isBuyer ? 'bg-[#0F172A] text-white' : 'bg-white border border-primary-100 text-primary-800'}`}>
+                                            <p>{msg.content}</p>
+                                            <p className={`mt-1 text-[10px] ${isBuyer ? 'text-slate-300' : 'text-primary-400'}`}>
+                                                {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                            </p>
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        )}
+                        <div ref={chatEndRef} />
+                    </div>
+                    <form onSubmit={handleSendBuyerChat} className="mt-3 flex gap-2">
                         <input
-                            type="range"
-                            min={0}
-                            max={15}
-                            step={0.1}
-                            value={counterReductionPercent}
-                            onChange={(e) => setCounterReductionPercent(clampCounterReduction(Number(e.target.value)))}
-                            className="w-full accent-primary-900"
+                            value={chatInput}
+                            onChange={(e) => setChatInput(e.target.value)}
+                            placeholder="Type your negotiation message..."
+                            className="flex-1 px-3 py-2 text-sm rounded-xl border border-primary-100"
                         />
-                        <div className="flex items-center justify-between mt-2 text-[11px] text-primary-400">
-                            <span>0%</span>
-                            <span className={`${counterReductionPercent === 10 ? 'text-primary-700 font-semibold' : ''}`}>10% recommended</span>
-                            <span>15% max</span>
-                        </div>
-                        <div className="mt-3 text-xs text-primary-600">
-                            New total: <span className="font-semibold text-primary-900">{fmt(customTotal)}</span>
-                            <span className="ml-2 text-primary-400">(from {fmt(initialTotal)})</span>
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        <button onClick={handleSaveCounter} disabled={actionLoading}
-                            className="flex-1 sm:flex-none px-6 py-3 rounded-xl text-sm font-semibold text-white transition-all disabled:opacity-50"
-                            style={{ background: '#0F172A' }}>
-                            {actionLoading ? 'Sending…' : 'Submit Counter Offer'}
+                        <button
+                            type="submit"
+                            disabled={chatBusy || !chatInput.trim()}
+                            className="px-4 py-2 rounded-xl bg-[#0F172A] text-white text-xs font-semibold disabled:opacity-50"
+                        >
+                            Send
                         </button>
-                        <button onClick={() => setShowCounterForm(false)} disabled={actionLoading}
-                            className="px-6 py-3 rounded-xl border border-primary-200 text-sm font-semibold text-primary-600 hover:bg-primary-50 transition-all disabled:opacity-50">
-                            Cancel
-                        </button>
-                    </div>
+                    </form>
                 </div>
-            )
-            }
+            )}
 
 
 
             {/* Accepted state */}
             {
-                (canonicalStatus === 'ACCEPTED_PENDING_OPS_RECHECK' || canonicalStatus === 'ACCEPTED_PAYMENT_PENDING' || canonicalStatus === 'PAYMENT_LINK_SENT') && (
+                (canonicalStatus === 'ACCEPTED_PAYMENT_PENDING' || canonicalStatus === 'PAYMENT_LINK_SENT') && (
                     <div className="rounded-2xl border border-green-200 p-6 mb-6" style={{ background: 'rgba(16,185,129,0.04)' }}>
                         <div className="flex items-center justify-between">
                             <div>
                                 <p className="text-sm font-semibold text-green-800">✅ Quotation Accepted</p>
                                 <p className="text-xs text-green-600 mt-1">
-                                    {canonicalStatus === 'ACCEPTED_PENDING_OPS_RECHECK'
-                                        ? 'Your order is awaiting Ops final approval before payment can begin.'
-                                        : 'Your order has been created. Proceed to payment to confirm.'}
+                                    {'Your order has been created. Proceed to payment to confirm.'}
                                 </p>
                             </div>
                             <Link href="/app/orders"
@@ -636,12 +665,7 @@ export default function BuyerQuotationDetailPage() {
                                     {paymentNotice}
                                 </p>
                             )}
-                            {canonicalStatus === 'ACCEPTED_PENDING_OPS_RECHECK' ? (
-                                <div className="mt-3">
-                                    <p className="text-sm font-semibold text-cyan-700">Awaiting Ops final check</p>
-                                    <p className="text-xs text-cyan-700/80 mt-1">Sales can send payment link only after Ops approves this order.</p>
-                                </div>
-                            ) : order && order.paymentLinkSentAt ? (
+                            {order && order.paymentLinkSentAt ? (
                                 <div className="mt-3 space-y-3">
                                     {latestPaymentReference && (
                                         <div className="text-xs text-green-800 bg-green-100/70 border border-green-200 rounded-xl px-3 py-2">
@@ -690,9 +714,25 @@ export default function BuyerQuotationDetailPage() {
                                                     });
                                                     return;
                                                 }
+                                                const policy = await api.getPaymentPolicy(order.id) as { minUpfrontAmount?: number; outstandingBalance?: number };
+                                                const amountToPay = Number(payAmount);
+                                                const totalPaidBefore = Number(order.paidAmount || 0);
+                                                const paymentType: 'advance' | 'balance' = totalPaidBefore > 0 ? 'balance' : 'advance';
+                                                if (paymentType === 'advance' && Number(policy?.minUpfrontAmount || 0) > amountToPay) {
+                                                    alert(`Minimum upfront for your tier is ${fmt(Number(policy?.minUpfrontAmount || 0))}`);
+                                                    setPaying(false);
+                                                    return;
+                                                }
+                                                if (Number(policy?.outstandingBalance || 0) > 0 && amountToPay > Number(policy.outstandingBalance)) {
+                                                    alert(`Amount cannot exceed outstanding ${fmt(Number(policy.outstandingBalance))}`);
+                                                    setPaying(false);
+                                                    return;
+                                                }
+
                                                 const result = await api.initiatePayment(order.id, {
                                                     method: payMethod,
-                                                    amount: Number(payAmount),
+                                                    amount: amountToPay,
+                                                    paymentType,
                                                     transactionRef: payRef || undefined,
                                                 });
                                                 const status = String((result as { status?: string } | null)?.status || '').toLowerCase();
@@ -720,8 +760,8 @@ export default function BuyerQuotationDetailPage() {
                                 </div>
                             ) : order ? (
                                 <div className="mt-3">
-                                    <p className="text-sm font-semibold text-amber-700">Awaiting payment link from Sales</p>
-                                    <p className="text-xs text-amber-700/80 mt-1">Payment will be enabled after Sales sends the payment link.</p>
+                                    <p className="text-sm font-semibold text-amber-700">Preparing secure payment session</p>
+                                    <p className="text-xs text-amber-700/80 mt-1">This usually takes a few seconds. Refresh once if needed.</p>
                                 </div>
                             ) : (
                                 <div className="mt-3">

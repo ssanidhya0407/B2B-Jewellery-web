@@ -253,13 +253,6 @@ export default function BuyerOrdersPage() {
         return Boolean(order.paymentLinkSentAt);
     };
 
-    const isOpsFinalApproved = (order: Order): boolean => {
-        const status = String(order.opsFinalCheckStatus || '').toLowerCase();
-        if (status === 'approved') return true;
-        if (status === 'rejected' || status === 'pending') return false;
-        return Boolean(order.paymentLinkSentAt || order.paymentConfirmedAt || order.forwardedToOpsAt);
-    };
-
     return (
         <div className="max-w-5xl mx-auto px-4 py-8">
             <div className="mb-8">
@@ -296,8 +289,7 @@ export default function BuyerOrdersPage() {
                         const paymentLinkSent = hasSalesPaymentLink(order);
                         const canPayFromBuyerSide =
                             (canonical === 'ACCEPTED_PAYMENT_PENDING' || canonical === 'PAYMENT_LINK_SENT') &&
-                            paymentLinkSent &&
-                            isOpsFinalApproved(order);
+                            paymentLinkSent;
                         const hasPendingManualVerification = order.payments.some(
                             (p) => String(p.method || '').toLowerCase() === 'bank_transfer' && String(p.status || '').toLowerCase() === 'pending'
                         );
@@ -518,15 +510,13 @@ export default function BuyerOrdersPage() {
                                             </div>
                                         )}
 
-                                        {!canPayFromBuyerSide && (canonical === 'ACCEPTED_PENDING_OPS_RECHECK' || canonical === 'ACCEPTED_PAYMENT_PENDING' || canonical === 'PAYMENT_LINK_SENT') && (
+                                        {!canPayFromBuyerSide && (canonical === 'ACCEPTED_PAYMENT_PENDING' || canonical === 'PAYMENT_LINK_SENT') && (
                                             <div className="px-6 py-4 border-t border-primary-50 bg-amber-50/40">
                                                 <p className="text-sm font-medium text-amber-700">
-                                                    {canonical === 'ACCEPTED_PENDING_OPS_RECHECK' ? 'Awaiting Ops final check approval' : 'Awaiting payment link from Sales'}
+                                                    {'Awaiting payment link from Sales'}
                                                 </p>
                                                 <p className="text-xs text-amber-600 mt-1">
-                                                    {canonical === 'ACCEPTED_PENDING_OPS_RECHECK'
-                                                        ? 'Payment will be enabled after Ops approves and Sales sends the payment link.'
-                                                        : 'Payment will be enabled here once Sales sends the link.'}
+                                                    {'Payment will be enabled here once Sales sends the link.'}
                                                 </p>
                                             </div>
                                         )}

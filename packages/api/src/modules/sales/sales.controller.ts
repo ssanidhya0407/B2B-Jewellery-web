@@ -80,6 +80,11 @@ export class SalesController {
         return this.salesService.reviseQuotation(quotationId, body.items, body.terms);
     }
 
+    @Post('quotations/:id/extend-expiry')
+    async extendQuotationExpiry(@Param('id') quotationId: string, @CurrentUser() user: User) {
+        return this.salesService.extendQuotationExpiry(quotationId, user.id);
+    }
+
     // ─── Order Conversion ───
 
     @Post('quotations/:id/convert-order')

@@ -22,11 +22,8 @@ export class OrdersService {
         });
         if (!order) throw new NotFoundException('Order not found');
 
-        const total = Number(order.totalAmount || 0);
-        const paidAmount = Number(order.paidAmount || 0);
-        const isFullyPaid = total > 0 ? paidAmount >= total : false;
         const paidRecord = order.payments?.find((p) => ['paid', 'completed'].includes((p.status || '').toLowerCase()));
-        const paymentConfirmedAt = order.paymentConfirmedAt || (isFullyPaid ? (paidRecord?.paidAt || paidRecord?.createdAt || null) : null);
+        const paymentConfirmedAt = order.paymentConfirmedAt || (paidRecord?.paidAt || paidRecord?.createdAt || null);
         if (!paymentConfirmedAt) {
             return { order, autoForwarded: false, alreadyForwarded: false };
         }
@@ -101,10 +98,24 @@ export class OrdersService {
                 : null);
         return {
             ...order,
-            opsFinalCheckStatus: order.opsFinalCheckStatus || (order.paymentLinkSentAt || paymentConfirmedAt || forwardedToOpsAt ? 'approved' : 'pending'),
+            opsFinalCheckStatus: order.opsFinalCheckStatus || 'approved',
             paymentConfirmedAt,
             forwardedToOpsAt,
         };
+    }
+
+    private getBuyerTier(userCreatedAt?: Date | null): 'T1' | 'T2' | 'T3' {
+        if (!userCreatedAt) return 'T3';
+        const days = Math.floor((Date.now() - new Date(userCreatedAt).getTime()) / (1000 * 60 * 60 * 24));
+        if (days >= 365) return 'T1';
+        if (days >= 120) return 'T2';
+        return 'T3';
+    }
+
+    private getMinimumUpfrontPercent(tier: 'T1' | 'T2' | 'T3') {
+        if (tier === 'T1') return 60;
+        if (tier === 'T2') return 70;
+        return 80;
     }
 
     // Buyer: accept a quotation → create order
@@ -153,7 +164,10 @@ export class OrdersService {
                     salesPersonId: quotation.createdById,
                     quotationId: quotation.id,
                     status: 'pending_payment',
-                    opsFinalCheckStatus: 'pending',
+                    opsFinalCheckStatus: 'approved',
+                    paymentLinkSentAt: new Date(),
+                    paymentLinkSentById: quotation.createdById,
+                    paymentLinkChannel: 'system_auto',
                     totalAmount: quotation.quotedTotal || new Prisma.Decimal(0),
                     items: {
                         create: quotation.items.map((item) => ({
@@ -186,6 +200,15 @@ export class OrdersService {
 
         // Notify buyer
         await this.notifications.notifyOrderCreated(buyerId, order.id, orderNumber);
+        await this.prisma.notification.create({
+            data: {
+                userId: buyerId,
+                type: 'payment_link_ready',
+                title: 'Payment Link Ready',
+                message: `Your payment link for order #${orderNumber} is ready.`,
+                link: `/app/orders`,
+            },
+        }).catch(() => null);
 
         // Calculate commission
         try {
@@ -225,93 +248,26 @@ export class OrdersService {
 
     // Buyer: revised offer (counter-offer)
     async counterOffer(quotationId: string, buyerId: string, items: Array<{ cartItemId: string; finalUnitPrice: number }>) {
-        const quotation = await this.prisma.quotation.findUnique({
-            where: { id: quotationId },
-            include: { cart: true },
+        void quotationId;
+        void buyerId;
+        void items;
+        throw new BadRequestException('Counter offers are disabled. Use negotiation chat with sales.');
+    }
+
+    async getPaymentPolicy(orderId: string, buyerId: string) {
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: { buyer: { select: { createdAt: true } } },
         });
-
-        if (!quotation) throw new NotFoundException('Quotation not found');
-        if (quotation.cart.userId !== buyerId) {
-            throw new BadRequestException('This quotation is not for you');
-        }
-        if (quotation.status !== 'sent') {
-            throw new BadRequestException('A counter-offer can only be submitted once on the initial quote.');
-        }
-
-        // Generate sequential quotation number: QT-YYYY-NNN
-        const year = new Date().getFullYear();
-        const prefix = `QT-${year}-`;
-
-        let newQuotationId = '';
-
-        await this.prisma.$transaction(async (tx) => {
-            const lastQuotation = await tx.quotation.findFirst({
-                where: { quotationNumber: { startsWith: prefix } },
-                orderBy: { quotationNumber: 'desc' },
-                select: { quotationNumber: true },
-            });
-
-            let nextSeq = 1;
-            if (lastQuotation?.quotationNumber) {
-                const seqPart = lastQuotation.quotationNumber.replace(prefix, '');
-                nextSeq = parseInt(seqPart, 10) + 1;
-            }
-            const newQuotationNumber = `${prefix}${nextSeq.toString().padStart(4, '0')}`;
-
-            const cartItems = await tx.cartItem.findMany({
-                where: { cartId: quotation.cartId },
-            });
-
-            const quotationItems = items.map((item) => {
-                const cartItem = cartItems.find((ci) => ci.id === item.cartItemId);
-                const quantity = cartItem?.quantity || 1;
-                return {
-                    cartItemId: item.cartItemId,
-                    finalUnitPrice: item.finalUnitPrice,
-                    quantity,
-                    lineTotal: new Prisma.Decimal(item.finalUnitPrice).mul(quantity),
-                };
-            });
-
-            const quotedTotal = quotationItems.reduce((sum, item) => sum.add(item.lineTotal), new Prisma.Decimal(0));
-
-            const newQuotation = await tx.quotation.create({
-                data: {
-                    cartId: quotation.cartId,
-                    createdById: quotation.createdById, // the sales rep remains the owner
-                    quotationNumber: newQuotationNumber,
-                    quotedTotal,
-                    validUntil: quotation.validUntil,
-                    status: 'countered',
-                    terms: quotation.terms,
-                    items: {
-                        create: quotationItems.map(qi => ({
-                            cartItemId: qi.cartItemId,
-                            finalUnitPrice: qi.finalUnitPrice,
-                            quantity: qi.quantity,
-                            lineTotal: qi.lineTotal
-                        })),
-                    }
-                }
-            });
-
-            newQuotationId = newQuotation.id;
-
-            // Log this counter offer so the tracker picks it up
-            const oldTotal = Number(quotation.quotedTotal || 0);
-            const newTotal = Number(quotedTotal || 0);
-            const fmt = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN');
-
-            await tx.message.create({
-                data: {
-                    cartId: quotation.cartId,
-                    content: `[System] Buyer submitted a counter-offer: ${fmt(oldTotal)} → ${fmt(newTotal)}`,
-                    senderId: buyerId,
-                }
-            });
-        });
-
-        return this.getQuotationForBuyer(quotationId, buyerId);
+        if (!order) throw new NotFoundException('Order not found');
+        if (order.buyerId !== buyerId) throw new BadRequestException('This order is not yours');
+        const totalAmount = Number(order.totalAmount || 0);
+        const paidAmount = Number(order.paidAmount || 0);
+        const tier = this.getBuyerTier(order.buyer?.createdAt || null);
+        const minUpfrontPercent = this.getMinimumUpfrontPercent(tier);
+        const minUpfrontAmount = Number(((totalAmount * minUpfrontPercent) / 100).toFixed(2));
+        const outstandingBalance = Math.max(0, Number((totalAmount - paidAmount).toFixed(2)));
+        return { orderId, tier, totalAmount, paidAmount, minUpfrontPercent, minUpfrontAmount, outstandingBalance };
     }
 
     // Buyer: get my orders
@@ -395,6 +351,7 @@ export class OrdersService {
         data: {
             method: 'card' | 'bank_transfer' | 'upi';
             amount: number;
+            paymentType?: 'advance' | 'balance';
             transactionRef?: string;
         },
     ) {
@@ -409,21 +366,43 @@ export class OrdersService {
         if (!['pending_payment'].includes(order.status)) {
             throw new BadRequestException('Payment not applicable for this order status');
         }
-        const opsFinalStatus = (order.opsFinalCheckStatus || '').toLowerCase();
-        if (opsFinalStatus !== 'approved') {
-            throw new BadRequestException('Ops final check approval is required before payment');
-        }
         if (!order.paymentLinkSentAt) {
             throw new BadRequestException('Payment link has not been sent by sales yet');
+        }
+        const amount = Number(data.amount || 0);
+        if (!Number.isFinite(amount) || amount <= 0) {
+            throw new BadRequestException('Invalid payment amount');
+        }
+        const totalAmount = Number(order.totalAmount || 0);
+        const paidAmount = Number(order.paidAmount || 0);
+        const outstanding = Math.max(0, totalAmount - paidAmount);
+        if (outstanding <= 0) throw new BadRequestException('Order is already fully paid');
+
+        const paymentType: 'advance' | 'balance' = data.paymentType || (paidAmount > 0 ? 'balance' : 'advance');
+        if (amount > outstanding + 0.0001) {
+            throw new BadRequestException('Payment amount exceeds outstanding balance');
+        }
+        if (paymentType === 'advance' && paidAmount <= 0) {
+            const buyer = await this.prisma.user.findUnique({
+                where: { id: buyerId },
+                select: { createdAt: true },
+            });
+            const tier = this.getBuyerTier(buyer?.createdAt || null);
+            const minPct = this.getMinimumUpfrontPercent(tier);
+            const minUpfrontAmount = (totalAmount * minPct) / 100;
+            if (amount + 0.0001 < minUpfrontAmount) {
+                throw new BadRequestException(`Minimum upfront payment is ${minPct}% (${minUpfrontAmount.toFixed(2)}) for your tier.`);
+            }
         }
 
         const payment = await this.prisma.payment.create({
             data: {
                 orderId,
-                amount: data.amount,
+                amount,
                 method: data.method,
                 status: data.method === 'bank_transfer' ? 'pending' : 'processing',
                 gatewayRef: data.transactionRef,
+                paymentType,
                 expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000), // 48hr expiry
             },
         });
@@ -439,8 +418,7 @@ export class OrdersService {
                     },
                 });
 
-                const newPaidAmount = Number(order.paidAmount) + data.amount;
-                const totalAmount = Number(order.totalAmount);
+                const newPaidAmount = Number(order.paidAmount) + amount;
                 const isFullyPaid = newPaidAmount >= totalAmount;
                 const newStatus = isFullyPaid ? 'confirmed' : 'pending_payment';
 
@@ -449,7 +427,7 @@ export class OrdersService {
                     data: {
                         paidAmount: newPaidAmount,
                         status: newStatus,
-                        paymentConfirmedAt: isFullyPaid ? new Date() : undefined,
+                        paymentConfirmedAt: new Date(),
                         paymentConfirmationSource: data.method === 'upi' || data.method === 'card' ? 'payment_gateway' : undefined,
                     },
                 });
@@ -457,6 +435,8 @@ export class OrdersService {
 
             await this.notifications.notifyPaymentReceived(buyerId, orderId, order.orderNumber);
             await this.autoForwardToOpsAfterPaymentValidation(orderId, order.salesPersonId || null);
+            const paidPayment = await this.prisma.payment.findUnique({ where: { id: payment.id } });
+            return paidPayment;
         }
 
         return payment;

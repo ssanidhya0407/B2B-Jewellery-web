@@ -218,7 +218,7 @@ export default function GlobalBuyerChat() {
                                 return (
                                     <div key={message.id} className="text-center">
                                         <span className="inline-block px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-white text-gray-500 ring-1 ring-gray-200">
-                                            {message.content.replace('[System]', '').trim()}
+                                            {formatSystemText(message.content)}
                                         </span>
                                     </div>
                                 );
@@ -276,3 +276,30 @@ export default function GlobalBuyerChat() {
         </>
     );
 }
+    const formatSystemText = (content: string) => {
+        const raw = content.replace('[System]', '').trim();
+        const lowered = raw.toLowerCase();
+        if (lowered.includes('auto initial quote')) return 'Initial quote offered';
+        if (lowered.includes('expiry_extended')) {
+            const match = raw.match(/->\s*(.+)$/);
+            if (match?.[1]) {
+                const date = new Date(match[1].trim());
+                if (!Number.isNaN(date.getTime())) {
+                    return `Expiry extended to ${date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+                }
+            }
+            return 'Expiry extended';
+        }
+        if (lowered.includes('final quotation')) return 'Final offer offered';
+        if (lowered.includes('reminder at')) {
+            const match = raw.match(/reminder at:\s*(.+)$/i);
+            if (match?.[1]) {
+                const date = new Date(match[1].trim());
+                if (!Number.isNaN(date.getTime())) {
+                    return `Decision reminder scheduled for ${date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+                }
+            }
+            return 'Decision reminder scheduled';
+        }
+        return raw;
+    };

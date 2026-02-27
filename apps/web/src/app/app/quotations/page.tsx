@@ -377,17 +377,15 @@ export default function BuyerQuotationsPage() {
                                     </div>
                                 ) : (
                                     <p className="text-xs font-medium text-primary-400">
-                                        {canonical === 'COUNTER' ? 'Awaiting sales response to your counter offer' : 'View details for latest status'}
+                                        {'View details for latest status'}
                                     </p>
                                 )}
                             </div>
 
-                            {(canonical === 'ACCEPTED_PENDING_OPS_RECHECK' || canonical === 'ACCEPTED_PAYMENT_PENDING') && (
+                            {(canonical === 'ACCEPTED_PAYMENT_PENDING') && (
                                 <div className="flex items-center justify-between p-6 border-t border-green-100 bg-green-50/50">
                                     <p className="text-sm text-green-700">
-                                        {canonical === 'ACCEPTED_PENDING_OPS_RECHECK'
-                                            ? '✅ Quotation accepted — awaiting Ops final check before payment link'
-                                            : '✅ Quotation accepted — your order has been created'}
+                                        {'✅ Quotation accepted — your order has been created'}
                                     </p>
                                     <div className="flex items-center gap-3">
                                         <Link href={`/app/quotations/${q.id}`} className="text-sm font-medium text-primary-500 hover:underline">

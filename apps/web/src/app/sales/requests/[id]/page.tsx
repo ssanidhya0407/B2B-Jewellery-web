@@ -1,14 +1,13 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
-import { Building2, Calendar, ChevronRight, Clock, MapPin, Package, Phone, Search, ShoppingCart, Truck, X, MessageSquare, Send } from 'lucide-react';
+import { Building2, Calendar, ChevronRight, Clock, MapPin, Package, Phone, Search, ShoppingCart, Truck, X } from 'lucide-react';
 import QuotationTracker, { TrackerData } from '@/components/QuotationTracker';
 import CatalogBrowser from '@/components/sales/CatalogBrowser';
 import {
-    canUseNegotiationChat,
     deriveCanonicalWorkflowStatus,
     deriveOfferIterations,
     deriveSalesModuleStatus,
@@ -193,7 +192,7 @@ function buildTrackerFromRequest(request: RequestDetail): TrackerData {
     if (latestQuotation?.sentAt) {
         timeline.push({
             phase: 4,
-            label: 'Quotation Sent',
+            label: 'Initial Quote Offered',
             status: 'completed',
             timestamp: latestQuotation.sentAt,
             actor: 'sales',
@@ -214,7 +213,7 @@ function buildTrackerFromRequest(request: RequestDetail): TrackerData {
     if (latestQuotation?.status === 'negotiating') {
         timeline.push({
             phase: 5.5,
-            label: 'Final Offer Sent',
+            label: 'Final Offer Offered',
             status: 'completed',
             timestamp: latestQuotation.updatedAt || latestQuotation.sentAt || latestQuotation.createdAt,
             actor: 'sales',
@@ -380,34 +379,10 @@ export default function SalesRequestDetailPage() {
     const [toast, setToast] = useState<string | null>(null);
     const [showTracker, setShowTracker] = useState(false);
 
-    const [messages, setMessages] = useState<any[]>([]);
-    const [newMessage, setNewMessage] = useState('');
-    const messagesEndRef = useRef<HTMLDivElement>(null);
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [hasUnread, setHasUnread] = useState(false);
     const [paymentActionLoading, setPaymentActionLoading] = useState(false);
     const [paymentConfirmationSource, setPaymentConfirmationSource] = useState('bank_transfer');
     const [marginPercentByItem, setMarginPercentByItem] = useState<Record<string, number>>({});
     const [expandedVersionId, setExpandedVersionId] = useState<string | null>(null);
-
-    const loadMessages = useCallback(async () => {
-        try {
-            const data = await api.getSalesMessages(cartId);
-            const msgs = data as any[];
-            setMessages(msgs);
-
-            // Check for unread
-            if (!isChatOpen && msgs.length > 0) {
-                const lastSeen = localStorage.getItem(`chat_last_seen_${cartId}`);
-                const lastMsgTime = new Date(msgs[msgs.length - 1].createdAt).getTime();
-                if (!lastSeen || lastMsgTime > parseInt(lastSeen)) {
-                    setHasUnread(true);
-                }
-            }
-        } catch (err) {
-            console.error('Failed to load messages:', err);
-        }
-    }, [cartId, isChatOpen]);
 
     const activeQuotation = useMemo(() => latestQuotationForThread(request?.quotations), [request?.quotations]);
     const canonicalStatus = deriveCanonicalWorkflowStatus({
@@ -422,7 +397,6 @@ export default function SalesRequestDetailPage() {
         order: request?.order || null,
         opsForwarded: Boolean(request?.assignedAt),
     });
-    const isNegotiating = canUseNegotiationChat(canonicalStatus);
     const iterations = useMemo(() => deriveOfferIterations(request?.quotations), [request?.quotations]);
     const quotationById = useMemo(
         () => new Map((request?.quotations || []).map((q) => [q.id, q])),
@@ -437,9 +411,9 @@ export default function SalesRequestDetailPage() {
     const paymentConfirmed = Boolean(request?.order?.paymentConfirmedAt || request?.order?.payments?.some((p) => ['paid', 'completed'].includes((p.status || '').toLowerCase())));
     const forwardedToOps = Boolean(request?.order?.forwardedToOpsAt || ['confirmed', 'in_procurement', 'partially_shipped', 'shipped', 'partially_delivered', 'delivered'].includes((request?.order?.status || '').toLowerCase()));
     const opsFinalCheckStatus = (request?.order?.opsFinalCheckStatus || '').toLowerCase();
-    const opsFinalApproved = opsFinalCheckStatus === 'approved' || (!opsFinalCheckStatus && (paymentLinkSent || paymentConfirmed || forwardedToOps));
+    const opsFinalApproved = opsFinalCheckStatus !== 'rejected';
     const opsFinalRejected = opsFinalCheckStatus === 'rejected';
-    const opsFinalPending = Boolean(request?.order?.id) && !opsFinalApproved && !opsFinalRejected;
+    const opsFinalPending = false;
     const salesPaymentState = deriveSalesPaymentState(request?.order || null, paymentLinkSent);
     const latestIterationStatus: CanonicalWorkflowStatus = salesCanonicalStatus === 'CLOSED_DECLINED'
         ? 'CLOSED_DECLINED'
@@ -455,7 +429,7 @@ export default function SalesRequestDetailPage() {
                             ? 'ACCEPTED_PAYMENT_PENDING'
                             : deriveCanonicalWorkflowStatus({ latestQuotationStatus: activeQuotation?.status });
     const canManagePayment = Boolean(request?.order) && salesCanonicalStatus !== 'CLOSED_DECLINED';
-    const canSendOrResendPaymentLink = Boolean(request?.order?.id) && opsFinalApproved && !opsFinalRejected && !paymentConfirmed && !forwardedToOps;
+    const canSendOrResendPaymentLink = Boolean(request?.order?.id) && !opsFinalRejected && !paymentConfirmed && !forwardedToOps;
     const canConfirmPayment = !forwardedToOps && paymentLinkSent && !paymentConfirmed;
     const canCreateOrderForPayment = !request?.order?.id
         && salesCanonicalStatus !== 'CLOSED_DECLINED'
@@ -472,45 +446,6 @@ export default function SalesRequestDetailPage() {
         const preferred = byDate.find((p) => p.gatewayRef)?.gatewayRef;
         return preferred || null;
     }, [request?.order?.payments]);
-
-    useEffect(() => {
-        if (isNegotiating) {
-            loadMessages();
-            const interval = setInterval(loadMessages, 5000);
-            return () => clearInterval(interval);
-        } else {
-            setHasUnread(false);
-            setIsChatOpen(false);
-        }
-    }, [isNegotiating, loadMessages]);
-
-    useEffect(() => {
-        if (isChatOpen && messages.length > 0) {
-            setHasUnread(false);
-            localStorage.setItem(`chat_last_seen_${cartId}`, new Date(messages[messages.length - 1].createdAt).getTime().toString());
-        }
-    }, [isChatOpen, messages, cartId]);
-
-    useEffect(() => {
-        if (messagesEndRef.current && isChatOpen) {
-            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-        }
-    }, [messages, isChatOpen]);
-
-    const handleSendMessage = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!newMessage.trim() || !request) return;
-
-        const content = newMessage.trim();
-        setNewMessage('');
-
-        try {
-            await api.sendSalesMessage(request.id, content);
-            await loadMessages();
-        } catch (err) {
-            console.error('Failed to send message:', err);
-        }
-    };
 
     useEffect(() => {
         if (!toast) return;
@@ -586,6 +521,14 @@ export default function SalesRequestDetailPage() {
         if (!request) return [];
         return [...request.items, ...extraItems];
     }, [request, extraItems]);
+    const validCartItemIds = useMemo(() => new Set((request?.items || []).map((i) => i.id)), [request?.items]);
+    const extensionUsed = useMemo(() => {
+        const terms = String(activeQuotation?.terms || '');
+        if (!terms) return false;
+        const reminderCount = (terms.match(/\[System\]\s*Reminder At:/gi) || []).length;
+        return reminderCount >= 2;
+    }, [activeQuotation?.terms]);
+    const canExtendInitialQuote = Boolean(activeQuotation?.id) && String(activeQuotation?.status || '').toLowerCase() === 'sent' && !extensionUsed;
 
     const buyerName = useMemo(
         () => (request ? [request.user.firstName, request.user.lastName].filter(Boolean).join(' ') || request.user.email : ''),
@@ -609,7 +552,7 @@ export default function SalesRequestDetailPage() {
     const isClosed = salesCanonicalStatus === 'CLOSED_ACCEPTED' || salesCanonicalStatus === 'CLOSED_DECLINED';
     const isBuyerDeclined = salesCanonicalStatus === 'CLOSED_DECLINED';
     const buyerDeclineReason = useMemo(() => extractBuyerDeclineReason(activeQuotation), [activeQuotation]);
-    const isQuoted = canonicalStatus === 'QUOTED' || canonicalStatus === 'COUNTER' || canonicalStatus === 'FINAL' || ((request?.quotations?.length ?? 0) > 0);
+    const isQuoted = canonicalStatus === 'QUOTED' || canonicalStatus === 'FINAL' || ((request?.quotations?.length ?? 0) > 0);
     const allowQuoting = !!request && !isClosed && Boolean(request?.assignedAt);
     const isOpsValidated = Boolean(request?.validatedAt || request?.assignedAt);
     const submittedDisplay = fmtDate(request?.submittedAt || '');
@@ -738,21 +681,30 @@ export default function SalesRequestDetailPage() {
 
         const combined = allItems
             .map((item) => ({ cartItemId: item.id, finalUnitPrice: parseFloat(prices[item.id] || '0') }))
-            .filter((i) => i.finalUnitPrice > 0);
+            .filter((i) => i.finalUnitPrice > 0 && validCartItemIds.has(i.cartItemId));
 
         if (combined.length === 0) {
-            setQuoteError('Please set prices for at least one item.');
+            setQuoteError('Please set prices for at least one valid request item.');
             setQuoting(false);
             return;
         }
 
         try {
-            if (activeQuotation?.status === 'draft') {
-                await api.updateQuotation(activeQuotation.id, { items: combined });
-                await api.sendQuotation(activeQuotation.id);
+            if (activeQuotation?.id) {
+                if (activeQuotation?.status === 'draft') {
+                    await api.reviseSalesQuotation(activeQuotation.id, { items: combined });
+                } else {
+                    await api.reviseSalesQuotation(activeQuotation.id, { items: combined });
+                }
             } else {
-                const quotation = (await api.createQuotation({ cartId: request.id, items: combined })) as Quotation;
-                await api.sendQuotation(quotation.id);
+                const quotation = (await api.createSalesQuotation({
+                    cartId: request.id,
+                    items: combined,
+                    terms: 'Initial quote offered',
+                    deliveryTimeline: 'Standard fulfillment',
+                    paymentTerms: 'Payment link auto-issued on acceptance',
+                })) as Quotation;
+                await api.sendSalesQuotation(quotation.id);
             }
             await loadRequest();
             setExtraItems([]);
@@ -778,6 +730,20 @@ export default function SalesRequestDetailPage() {
             await loadRequest();
         } catch (err) {
             setToast(err instanceof Error ? err.message : 'Failed to send payment link');
+        } finally {
+            setPaymentActionLoading(false);
+        }
+    };
+
+    const handleExtendExpiry = async () => {
+        if (!activeQuotation?.id) return;
+        setPaymentActionLoading(true);
+        try {
+            await api.extendSalesQuotationExpiry(activeQuotation.id);
+            setToast('Expiry extended by 1 business day');
+            await loadRequest();
+        } catch (err) {
+            setToast(err instanceof Error ? err.message : 'Failed to extend expiry');
         } finally {
             setPaymentActionLoading(false);
         }
@@ -922,16 +888,27 @@ export default function SalesRequestDetailPage() {
                             </button>
 
                             {allowQuoting ? (
-                                <button
-                                    onClick={() => setShowQuoteForm((v) => !v)}
-                                    className={`h-10 px-5 rounded-[1rem] text-[11px] font-bold uppercase tracking-widest transition-all ring-1
+                                <>
+                                    {canExtendInitialQuote && (
+                                        <button
+                                            onClick={handleExtendExpiry}
+                                            disabled={paymentActionLoading}
+                                            className="h-10 px-5 rounded-[1rem] text-[11px] font-bold uppercase tracking-widest transition-all ring-1 bg-white text-gray-900 ring-gray-200 hover:ring-gray-300 disabled:opacity-50"
+                                        >
+                                            Extend +1 Day
+                                        </button>
+                                    )}
+                                    <button
+                                        onClick={() => setShowQuoteForm((v) => !v)}
+                                        className={`h-10 px-5 rounded-[1rem] text-[11px] font-bold uppercase tracking-widest transition-all ring-1
                                 ${showQuoteForm
-                                            ? 'bg-red-50 text-red-600 ring-red-100 hover:bg-red-100'
-                                            : 'bg-[#0F172A] text-white ring-[#0F172A] hover:bg-black'
-                                        }`}
-                                >
-                                    {showQuoteForm ? 'Cancel' : isQuoted ? 'Revise Quote' : 'Prepare Quote'}
-                                </button>
+                                                ? 'bg-red-50 text-red-600 ring-red-100 hover:bg-red-100'
+                                                : 'bg-[#0F172A] text-white ring-[#0F172A] hover:bg-black'
+                                            }`}
+                                    >
+                                        {showQuoteForm ? 'Cancel' : isQuoted ? 'Revise Quote' : 'Prepare Quote'}
+                                    </button>
+                                </>
                             ) : (
                                 <div className="h-10 px-5 rounded-[1rem] bg-gray-100 ring-1 ring-gray-200 flex items-center text-[11px] font-bold uppercase tracking-widest text-gray-600">
                                     {isClosed ? 'Closed' : 'Awaiting Ops Forward'}
@@ -1148,7 +1125,7 @@ export default function SalesRequestDetailPage() {
                                                     disabled={quoting || !Object.keys(prices).length}
                                                     className="w-full sm:w-auto h-12 px-8 rounded-full bg-[#0F172A] text-white font-bold text-[12px] uppercase tracking-widest hover:bg-black transition-transform active:scale-95 disabled:opacity-50 flex items-center justify-center shadow-lg shadow-indigo-900/20"
                                                 >
-                                                    {quoting ? 'Saving...' : (activeQuotation?.status === 'countered' ? 'Set Final Price' : (isQuoted ? 'Update Quote' : 'Send Quote'))}
+                                                    {quoting ? 'Saving...' : (isQuoted ? 'Update Quote' : 'Send Quote')}
                                                 </button>
                                             </div>
                                         </div>
@@ -1236,16 +1213,11 @@ export default function SalesRequestDetailPage() {
                                         </div>
 
                                         <p className="text-[12px] text-gray-500">
-                                            Sales owns payment lifecycle. Payment link is blocked until Ops final check is approved.
+                                            Sales owns payment lifecycle. Send payment link after buyer accepts and track settlement here.
                                         </p>
-                                        {opsFinalPending && (
-                                            <div className="rounded-xl border border-cyan-100 bg-cyan-50 px-4 py-3 text-[12px] text-cyan-700">
-                                                Ops final check is pending. Sales cannot send payment link yet.
-                                            </div>
-                                        )}
                                         {opsFinalRejected && (
                                             <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-[12px] text-gray-700">
-                                                Ops rejected this order before payment. Reason: {request?.order?.opsFinalCheckReason || 'No reason provided'}.
+                                                This request was rejected and closed. Reason: {request?.order?.opsFinalCheckReason || 'No reason provided'}.
                                             </div>
                                         )}
 
@@ -1312,105 +1284,6 @@ export default function SalesRequestDetailPage() {
                                 </div>
                             )}
                         </div>
-
-                        {/* Floating Chat UI */}
-                        {isNegotiating && (
-                            <>
-                                {/* Chat Toggle Button */}
-                                <button
-                                    onClick={() => setIsChatOpen(!isChatOpen)}
-                                    className={`fixed bottom-8 right-8 w-16 h-16 rounded-full shadow-2xl z-50 flex items-center justify-center transition-all duration-300 hover:scale-110 active:scale-95
-                                        ${isChatOpen ? 'bg-white text-gray-900 rotate-90 ring-1 ring-gray-100' : 'bg-[#0F172A] text-white'}
-                                    `}
-                                >
-                                    {isChatOpen ? <X className="w-6 h-6" /> : <MessageSquare className="w-6 h-6" />}
-                                    {hasUnread && !isChatOpen && (
-                                        <span className="absolute top-0 right-0 w-4 h-4 bg-red-500 rounded-full border-2 border-white animate-pulse" />
-                                    )}
-                                </button>
-
-                                {/* Chat Panel */}
-                                <div className={`fixed bottom-28 right-8 w-[400px] max-w-[calc(100vw-64px)] bg-white rounded-[2.5rem] border border-gray-50 shadow-[0_20px_50px_rgba(0,0,0,0.1)] z-50 overflow-hidden flex flex-col transition-all duration-300 origin-bottom-right
-                                    ${isChatOpen ? 'scale-100 opacity-100' : 'scale-75 opacity-0 pointer-events-none'}
-                                `}>
-                                    <div className="px-8 py-6 border-b border-gray-50/50 bg-[#0F172A] text-white">
-                                        <div className="flex justify-between items-center">
-                                            <div>
-                                                <h2 className="text-lg font-bold">Buyer Negotiation</h2>
-                                                <p className="text-[11px] text-gray-400 font-bold uppercase tracking-widest mt-0.5">Live Chat with {request.user.firstName}</p>
-                                            </div>
-                                            <button onClick={() => setIsChatOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-colors">
-                                                <X className="w-4 h-4" />
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <div className="h-[450px] overflow-y-auto p-6 space-y-6 bg-gray-50/30">
-                                        {messages.length === 0 ? (
-                                            <div className="h-full flex flex-col items-center justify-center text-center p-10">
-                                                <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center mb-4 text-2xl shadow-sm">💬</div>
-                                                <p className="text-sm font-bold text-gray-900">Start the conversation</p>
-                                                <p className="text-[12px] text-gray-400 mt-1">Clarify details or offer a final deal.</p>
-                                            </div>
-                                        ) : (
-                                            messages.map((msg: any) => {
-                                                const isBuyer = msg.sender.userType === 'external';
-                                                const isSystem = msg.content.startsWith('[System]');
-
-                                                if (isSystem) {
-                                                    return (
-                                                        <div key={msg.id} className="flex flex-col items-center justify-center w-full py-2">
-                                                            <div className="px-5 py-1.5 bg-gray-50 rounded-full border border-gray-100 shadow-sm">
-                                                                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest text-center">
-                                                                    {msg.content.replace('[System] ', '').replace('[System]', '')}
-                                                                </p>
-                                                            </div>
-                                                            <span className="text-[8px] text-gray-300 mt-1 font-bold uppercase tracking-[0.2em]">
-                                                                {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                }
-
-                                                return (
-                                                    <div key={msg.id} className={`flex flex-col max-w-[85%] ${!isBuyer ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
-                                                        <div className={`px-5 py-3 rounded-[1.5rem] shadow-sm
-                                                            ${!isBuyer ? 'bg-[#0F172A] text-white rounded-br-none' : 'bg-white text-gray-900 rounded-bl-none border border-gray-100'}
-                                                        `}>
-                                                            <p className="text-[13px] leading-relaxed">{msg.content}</p>
-                                                        </div>
-                                                        <span className="text-[9px] text-gray-400 mt-1.5 font-bold uppercase tracking-widest px-1">
-                                                            {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                            {isBuyer && msg.sender.firstName ? ` • ${msg.sender.firstName}` : ''}
-                                                        </span>
-                                                    </div>
-                                                );
-                                            })
-                                        )}
-                                        <div ref={messagesEndRef} />
-                                    </div>
-
-                                    <div className="p-4 bg-white border-t border-gray-50">
-                                        <form onSubmit={handleSendMessage} className="flex gap-2 bg-gray-50 p-1.5 rounded-[1.5rem] border border-gray-100 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
-                                            <input
-                                                type="text"
-                                                value={newMessage}
-                                                onChange={(e) => setNewMessage(e.target.value)}
-                                                placeholder="Type your reply..."
-                                                className="flex-1 bg-transparent px-4 py-2 text-[13px] font-medium outline-none"
-                                            />
-                                            <button
-                                                type="submit"
-                                                disabled={!newMessage.trim()}
-                                                className="w-10 h-10 bg-[#0F172A] text-white rounded-full flex items-center justify-center hover:bg-black transition-all disabled:opacity-30 shadow-md"
-                                            >
-                                                <Send className="w-4 h-4 ml-0.5" />
-                                            </button>
-                                        </form>
-                                    </div>
-                                </div>
-                            </>
-                        )}
 
                         {/* RIGHT: Sidebar Area */}
                         <div className="w-full lg:w-[400px] flex flex-col gap-6 lg:self-stretch">

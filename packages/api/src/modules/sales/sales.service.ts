@@ -5,6 +5,51 @@ import { PrismaService } from '../../database/prisma.service';
 export class SalesService {
     constructor(private readonly prisma: PrismaService) { }
 
+    private isBusinessDay(d: Date) {
+        const day = d.getDay();
+        return day >= 1 && day <= 5;
+    }
+
+    private alignToBusinessWindow(input: Date): Date {
+        const d = new Date(input);
+        while (!this.isBusinessDay(d)) d.setDate(d.getDate() + 1);
+        const start = new Date(d);
+        start.setHours(9, 30, 0, 0);
+        const end = new Date(d);
+        end.setHours(18, 30, 0, 0);
+        if (d < start) return start;
+        if (d >= end) {
+            const next = new Date(d);
+            next.setDate(next.getDate() + 1);
+            return this.alignToBusinessWindow(next);
+        }
+        return d;
+    }
+
+    private addBusinessHours(input: Date, hours: number): Date {
+        let d = this.alignToBusinessWindow(input);
+        let remainingMinutes = Math.round(hours * 60);
+        while (remainingMinutes > 0) {
+            d = this.alignToBusinessWindow(d);
+            const end = new Date(d);
+            end.setHours(18, 30, 0, 0);
+            const available = Math.max(0, Math.floor((end.getTime() - d.getTime()) / 60000));
+            if (available <= 0) {
+                d.setDate(d.getDate() + 1);
+                d.setHours(9, 30, 0, 0);
+                continue;
+            }
+            const step = Math.min(available, remainingMinutes);
+            d = new Date(d.getTime() + step * 60000);
+            remainingMinutes -= step;
+            if (remainingMinutes > 0) {
+                d.setDate(d.getDate() + 1);
+                d.setHours(9, 30, 0, 0);
+            }
+        }
+        return d;
+    }
+
     private async autoForwardOrderToOpsIfNeeded(orderId: string, actorId?: string | null) {
         const order = await this.prisma.order.findUnique({
             where: { id: orderId },
@@ -156,9 +201,6 @@ export class SalesService {
 
     async createOrderPaymentLink(orderId: string, salesPersonId: string) {
         const order = await this.getOwnedOrder(orderId, salesPersonId);
-        if (this.inferOpsFinalCheckStatus(order) !== 'approved') {
-            throw new BadRequestException('Ops final check must be approved before sending payment link');
-        }
         if ((order.opsFinalCheckStatus || '').toLowerCase() === 'rejected') {
             throw new BadRequestException('Cannot send payment link for a rejected request');
         }
@@ -243,9 +285,6 @@ export class SalesService {
         payload?: { source?: string; reference?: string },
     ) {
         const order = await this.getOwnedOrder(orderId, salesPersonId);
-        if (this.inferOpsFinalCheckStatus(order) !== 'approved') {
-            throw new BadRequestException('Ops final check must be approved before confirming payment');
-        }
         const paymentConfirmedAt = this.inferPaymentConfirmedAt(order);
         if (paymentConfirmedAt) {
             const forwarded = await this.autoForwardOrderToOpsIfNeeded(order.id, salesPersonId);
@@ -291,9 +330,6 @@ export class SalesService {
 
     async forwardPaidOrderToOps(orderId: string, salesPersonId: string) {
         const owned = await this.getOwnedOrder(orderId, salesPersonId);
-        if (this.inferOpsFinalCheckStatus(owned) !== 'approved') {
-            throw new BadRequestException('Ops final check must be approved before forwarding to Ops');
-        }
         const paymentConfirmedAt = this.inferPaymentConfirmedAt(owned);
         if (!paymentConfirmedAt) throw new BadRequestException('Payment must be confirmed before forwarding to Ops');
         const forwarded = await this.autoForwardOrderToOpsIfNeeded(orderId, salesPersonId);
@@ -561,8 +597,7 @@ export class SalesService {
         });
 
         const quotedTotal = quotationItems.reduce((sum, item) => sum + item.lineTotal, 0);
-        const validUntil = new Date();
-        validUntil.setHours(validUntil.getHours() + 48);
+        const validUntil = this.addBusinessHours(new Date(), 18);
 
         const fullTerms = [terms, `Delivery: ${deliveryTimeline}`, `Payment: ${paymentTerms}`]
             .filter(Boolean)
@@ -603,12 +638,19 @@ export class SalesService {
             throw new BadRequestException('Quotation has already been sent');
         }
 
-        const expiresAt = new Date();
-        expiresAt.setHours(expiresAt.getHours() + 48);
+        const now = new Date();
+        const expiresAt = this.addBusinessHours(now, 18);
+        const reminderAt = this.addBusinessHours(now, 15);
 
         await this.prisma.quotation.update({
             where: { id: quotationId },
-            data: { status: 'sent', sentAt: new Date(), expiresAt },
+            data: {
+                status: 'sent',
+                sentAt: now,
+                expiresAt,
+                validUntil: expiresAt,
+                terms: [quotation.terms, `[System] Reminder At: ${reminderAt.toISOString()}`].filter(Boolean).join('\n'),
+            },
         });
 
         await this.prisma.intendedCart.update({
@@ -622,7 +664,7 @@ export class SalesService {
                 userId: quotation.cart.userId,
                 type: 'quote_received',
                 title: 'Quotation Ready',
-                message: `Your quotation is ready. It expires in 48 hours.`,
+                message: `Your quotation is ready. It expires in 2 business days.`,
                 link: `/app/cart/${quotation.cartId}`,
             },
         });
@@ -663,20 +705,65 @@ export class SalesService {
         await this.prisma.quotationItem.createMany({ data: newItems });
         const quotedTotal = newItems.reduce((sum, i) => sum + i.lineTotal, 0);
 
-        const expiresAt = new Date();
-        expiresAt.setHours(expiresAt.getHours() + 48);
+        const now = new Date();
+        const expiresAt = this.addBusinessHours(now, 18);
+        const reminderAt = this.addBusinessHours(now, 15);
 
         return this.prisma.quotation.update({
             where: { id: quotationId },
             data: {
                 quotedTotal,
-                status: 'sent',
-                sentAt: new Date(),
+                status: 'negotiating',
+                sentAt: now,
                 expiresAt,
-                ...(terms !== undefined ? { terms } : {}),
+                validUntil: expiresAt,
+                terms: [terms !== undefined ? terms : quotation.terms, `[System] Reminder At: ${reminderAt.toISOString()}`].filter(Boolean).join('\n'),
             },
             include: { items: true },
         });
+    }
+
+    async extendQuotationExpiry(quotationId: string, salesPersonId: string) {
+        const quotation = await this.prisma.quotation.findUnique({
+            where: { id: quotationId },
+            include: { cart: true },
+        });
+        if (!quotation) throw new NotFoundException('Quotation not found');
+        if (quotation.createdById !== salesPersonId) {
+            throw new BadRequestException('This quotation is not assigned to you');
+        }
+        if ((quotation.status || '').toLowerCase() !== 'sent') {
+            throw new BadRequestException('Expiry can only be extended for an active initial quote');
+        }
+        const marker = `[System] EXPIRY_EXTENDED:${quotationId}`;
+        const already = await this.prisma.message.findFirst({
+            where: { cartId: quotation.cartId, content: { contains: marker } },
+            select: { id: true },
+        });
+        if (already) throw new BadRequestException('Expiry can be extended only once');
+
+        const base = quotation.expiresAt || new Date();
+        const nextExpiry = this.addBusinessHours(base, 9);
+        const reminderAt = this.addBusinessHours(base, 6);
+
+        const updated = await this.prisma.quotation.update({
+            where: { id: quotationId },
+            data: {
+                expiresAt: nextExpiry,
+                validUntil: nextExpiry,
+                terms: [quotation.terms, `[System] Reminder At: ${reminderAt.toISOString()}`].filter(Boolean).join('\n'),
+            },
+        });
+
+        await this.prisma.message.create({
+            data: {
+                cartId: quotation.cartId,
+                senderId: salesPersonId,
+                content: `${marker} -> ${nextExpiry.toISOString()}`,
+            },
+        });
+
+        return { success: true, quotationId, expiresAt: updated.expiresAt };
     }
 
     // ─── Convert Quote to Order ───
