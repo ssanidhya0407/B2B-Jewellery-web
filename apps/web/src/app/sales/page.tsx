@@ -165,10 +165,10 @@ export default function SalesDashboardPage() {
     }, [assignedRequests]);
     const hasThreadDataset = assignedRequests.length > 0;
     const pendingAction = hasThreadDataset
-        ? canonicalStatuses.filter((s) => ['SUBMITTED', 'UNDER_REVIEW', 'OPS_FORWARDED', 'ACCEPTED_PENDING_OPS_RECHECK'].includes(s)).length
+        ? canonicalStatuses.filter((s) => ['SUBMITTED', 'UNDER_REVIEW', 'OPS_FORWARDED'].includes(s)).length
         : (metrics.assignedRequests ?? 0);
     const quotedActive = hasThreadDataset
-        ? canonicalStatuses.filter((s) => ['QUOTED', 'COUNTER', 'FINAL'].includes(s)).length
+        ? canonicalStatuses.filter((s) => ['QUOTED', 'FINAL'].includes(s)).length
         : pl.quoted;
     const convertedOrders = hasThreadDataset
         ? canonicalStatuses.filter((s) => s === 'CLOSED_ACCEPTED').length

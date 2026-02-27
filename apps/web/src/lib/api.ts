@@ -248,10 +248,6 @@ class ApiClient {
         return this.request(`/orders/quotations/${quotationId}/reject`, { method: 'POST', body: { reason } });
     }
 
-    async counterQuotation(quotationId: string, items: Array<{ cartItemId: string; finalUnitPrice: number }>) {
-        return this.request(`/orders/quotations/${quotationId}/counter`, { method: 'POST', body: { items } });
-    }
-
     async getBuyerQuotationTracker(cartId: string) {
         return this.request(`/orders/tracker/${cartId}`);
     }
@@ -272,7 +268,11 @@ class ApiClient {
         return this.request(`/orders/${orderId}`);
     }
 
-    async initiatePayment(orderId: string, data: { method: 'card' | 'bank_transfer' | 'upi'; amount: number; transactionRef?: string }) {
+    async getPaymentPolicy(orderId: string) {
+        return this.request(`/orders/${orderId}/payment-policy`);
+    }
+
+    async initiatePayment(orderId: string, data: { method: 'card' | 'bank_transfer' | 'upi'; amount: number; paymentType?: 'advance' | 'balance'; transactionRef?: string }) {
         return this.request(`/orders/${orderId}/pay`, { method: 'POST', body: data });
     }
 
@@ -488,9 +488,10 @@ class ApiClient {
 
     async createSalesQuotation(data: {
         cartId: string;
-        items: Array<{ inventoryItemId: string; quantity: number; unitPrice: number; notes?: string }>;
-        validityHours?: number;
-        terms?: string;
+        items: Array<{ cartItemId: string; finalUnitPrice: number; notes?: string }>;
+        terms: string;
+        deliveryTimeline: string;
+        paymentTerms: string;
     }) {
         return this.request('/sales/quotations', { method: 'POST', body: data });
     }
@@ -500,11 +501,14 @@ class ApiClient {
     }
 
     async reviseSalesQuotation(quotationId: string, data: {
-        items: Array<{ inventoryItemId: string; quantity: number; unitPrice: number; notes?: string }>;
-        validityHours?: number;
+        items: Array<{ cartItemId: string; finalUnitPrice: number }>;
         terms?: string;
     }) {
         return this.request(`/sales/quotations/${quotationId}/revise`, { method: 'PUT', body: data });
+    }
+
+    async extendSalesQuotationExpiry(quotationId: string) {
+        return this.request(`/sales/quotations/${quotationId}/extend-expiry`, { method: 'POST' });
     }
 
     async convertToOrder(quotationId: string) {

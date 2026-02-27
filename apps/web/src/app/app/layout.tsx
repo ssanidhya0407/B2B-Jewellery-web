@@ -27,6 +27,7 @@ export default function BuyerWorkspaceLayout({ children }: { children: ReactNode
     const profileRef = useRef<HTMLDivElement>(null);
     const onboardingIncomplete = progress.completed < progress.total;
     const cartActive = pathname.startsWith('/app/cart');
+    const isQuotationDetailRoute = /^\/app\/quotations\/[^/]+$/.test(pathname || '');
 
     useEffect(() => {
         const handler = (e: MouseEvent) => {
@@ -220,7 +221,7 @@ export default function BuyerWorkspaceLayout({ children }: { children: ReactNode
 
             <BuyerAccessGate>
                 {children}
-                <GlobalBuyerChat />
+                {!isQuotationDetailRoute && <GlobalBuyerChat />}
             </BuyerAccessGate>
         </div>
     );

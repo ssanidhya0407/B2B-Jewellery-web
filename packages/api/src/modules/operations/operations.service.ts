@@ -10,6 +10,131 @@ export class OperationsService {
         return new Prisma.Decimal(Number(v || 0));
     }
 
+    private isBusinessDay(d: Date) {
+        const day = d.getDay();
+        return day >= 1 && day <= 5;
+    }
+
+    private alignToBusinessWindow(input: Date): Date {
+        const d = new Date(input);
+        while (!this.isBusinessDay(d)) d.setDate(d.getDate() + 1);
+        const start = new Date(d);
+        start.setHours(9, 30, 0, 0);
+        const end = new Date(d);
+        end.setHours(18, 30, 0, 0);
+        if (d < start) return start;
+        if (d >= end) {
+            const next = new Date(d);
+            next.setDate(next.getDate() + 1);
+            return this.alignToBusinessWindow(next);
+        }
+        return d;
+    }
+
+    private addBusinessHours(input: Date, hours: number): Date {
+        let d = this.alignToBusinessWindow(input);
+        let remaining = Math.round(hours * 60);
+        while (remaining > 0) {
+            d = this.alignToBusinessWindow(d);
+            const end = new Date(d);
+            end.setHours(18, 30, 0, 0);
+            const available = Math.max(0, Math.floor((end.getTime() - d.getTime()) / 60000));
+            if (available <= 0) {
+                d.setDate(d.getDate() + 1);
+                d.setHours(9, 30, 0, 0);
+                continue;
+            }
+            const step = Math.min(available, remaining);
+            d = new Date(d.getTime() + step * 60000);
+            remaining -= step;
+            if (remaining > 0) {
+                d.setDate(d.getDate() + 1);
+                d.setHours(9, 30, 0, 0);
+            }
+        }
+        return d;
+    }
+
+    private async createAndSendAutoInitialQuote(cartId: string, salesPersonId: string) {
+        const cart = await this.prisma.intendedCart.findUnique({
+            where: { id: cartId },
+            include: {
+                items: {
+                    include: {
+                        recommendationItem: {
+                            include: {
+                                inventorySku: true,
+                                manufacturerItem: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+        if (!cart || cart.items.length === 0) return null;
+
+        const existing = await this.prisma.quotation.findFirst({
+            where: { cartId, status: { in: ['draft', 'sent', 'negotiating', 'accepted'] } },
+            orderBy: { createdAt: 'desc' },
+        });
+        if (existing) return existing;
+
+        const year = new Date().getFullYear();
+        const prefix = `QT-${year}-`;
+        const lastQuotation = await this.prisma.quotation.findFirst({
+            where: { quotationNumber: { startsWith: prefix } },
+            orderBy: { quotationNumber: 'desc' },
+            select: { quotationNumber: true },
+        });
+        const nextSeq = lastQuotation?.quotationNumber
+            ? parseInt(lastQuotation.quotationNumber.replace(prefix, ''), 10) + 1
+            : 1;
+        const quotationNumber = `${prefix}${String(nextSeq).padStart(4, '0')}`;
+
+        const quoteItems = cart.items.map((item) => {
+            const rec = item.recommendationItem;
+            const inv = rec?.inventorySku;
+            const mf = rec?.manufacturerItem;
+            const estimatedUnit =
+                Number(rec?.displayPriceMin || 0)
+                || Number(inv?.baseCost || 0)
+                || Number(mf?.baseCostMin || 0)
+                || 1;
+            const finalUnit = Number((estimatedUnit * 1.12).toFixed(2));
+            const qty = Number(item.quantity || 1);
+            return {
+                cartItemId: item.id,
+                quantity: qty,
+                finalUnitPrice: this.asDecimal(finalUnit),
+                lineTotal: this.asDecimal(finalUnit * qty),
+            };
+        });
+        const quotedTotal = quoteItems.reduce((sum, item) => sum + Number(item.lineTotal), 0);
+        const now = new Date();
+        const expiresAt = this.addBusinessHours(now, 18);
+        const reminderAt = this.addBusinessHours(now, 15);
+
+        const created = await this.prisma.quotation.create({
+            data: {
+                quotationNumber,
+                cartId,
+                createdById: salesPersonId,
+                quotedTotal: this.asDecimal(quotedTotal),
+                status: 'sent',
+                sentAt: now,
+                expiresAt,
+                validUntil: expiresAt,
+                terms: `[System] Auto initial quote (12% markup)\n[System] Reminder At: ${reminderAt.toISOString()}`,
+                items: { create: quoteItems },
+            },
+        });
+        await this.prisma.intendedCart.update({
+            where: { id: cartId },
+            data: { status: 'quoted' },
+        });
+        return created;
+    }
+
     async getDashboard() {
         const [submitted, underReview, orders, suppliers] = await Promise.all([
             this.prisma.intendedCart.count({ where: { status: 'submitted' } }),
@@ -603,7 +728,7 @@ export class OperationsService {
         const salesUser = await this.prisma.user.findUnique({ where: { id: salesPersonId } });
         if (!salesUser || salesUser.userType !== 'sales') throw new BadRequestException('Invalid sales person');
 
-        return this.prisma.intendedCart.update({
+        const updated = await this.prisma.intendedCart.update({
             where: { id: cartId },
             data: {
                 assignedSalesId: salesPersonId,
@@ -612,6 +737,8 @@ export class OperationsService {
             },
             include: { assignedSales: true },
         });
+        await this.createAndSendAutoInitialQuote(cartId, salesPersonId);
+        return updated;
     }
 
     async getSalesTeam() {
@@ -1052,6 +1179,8 @@ export class OperationsService {
             details: { salesPersonId: chosen.rep.id, workload: chosen.openAssignments },
             performedBy: assignedByUserId || chosen.rep.id,
         });
+
+        await this.createAndSendAutoInitialQuote(cartId, chosen.rep.id);
 
         return updated;
     }

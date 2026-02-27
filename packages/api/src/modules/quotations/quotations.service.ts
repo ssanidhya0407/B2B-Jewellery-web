@@ -7,6 +7,51 @@ import { PrismaService } from '../../database/prisma.service';
 export class QuotationsService {
     constructor(private readonly prisma: PrismaService) { }
 
+    private isBusinessDay(d: Date) {
+        const day = d.getDay();
+        return day >= 1 && day <= 5;
+    }
+
+    private alignToBusinessWindow(input: Date): Date {
+        const d = new Date(input);
+        while (!this.isBusinessDay(d)) d.setDate(d.getDate() + 1);
+        const start = new Date(d);
+        start.setHours(9, 30, 0, 0);
+        const end = new Date(d);
+        end.setHours(18, 30, 0, 0);
+        if (d < start) return start;
+        if (d >= end) {
+            const next = new Date(d);
+            next.setDate(next.getDate() + 1);
+            return this.alignToBusinessWindow(next);
+        }
+        return d;
+    }
+
+    private addBusinessHours(input: Date, hours: number): Date {
+        let d = this.alignToBusinessWindow(input);
+        let remaining = Math.round(hours * 60);
+        while (remaining > 0) {
+            d = this.alignToBusinessWindow(d);
+            const end = new Date(d);
+            end.setHours(18, 30, 0, 0);
+            const available = Math.max(0, Math.floor((end.getTime() - d.getTime()) / 60000));
+            if (available <= 0) {
+                d.setDate(d.getDate() + 1);
+                d.setHours(9, 30, 0, 0);
+                continue;
+            }
+            const step = Math.min(available, remaining);
+            d = new Date(d.getTime() + step * 60000);
+            remaining -= step;
+            if (remaining > 0) {
+                d.setDate(d.getDate() + 1);
+                d.setHours(9, 30, 0, 0);
+            }
+        }
+        return d;
+    }
+
     async getSubmittedRequests() {
         return this.prisma.intendedCart.findMany({
             where: {
@@ -147,9 +192,8 @@ export class QuotationsService {
 
         const quotedTotal = quotationItems.reduce((sum, item) => sum + item.lineTotal, 0);
 
-        // Set validity to 30 days
-        const validUntil = new Date();
-        validUntil.setDate(validUntil.getDate() + 30);
+        // Canonical validity: 18 business hours.
+        const validUntil = this.addBusinessHours(new Date(), 18);
 
         return this.prisma.quotation.create({
             data: {
@@ -288,16 +332,20 @@ export class QuotationsService {
         const previousQuotation = quotation.cart?.quotations.find(q => q.id !== quotationId);
         const finalStatus = previousQuotation?.status === 'countered' ? 'negotiating' : 'sent';
 
-        // Set expiry: validUntil if already set, otherwise 30 days from now
-        const expiresAt = quotation.validUntil || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        // Canonical expiry: always 18 business hours from send.
+        const now = new Date();
+        const expiresAt = this.addBusinessHours(now, 18);
+        const reminderAt = this.addBusinessHours(now, 15);
 
         // Update quotation status with sentAt and expiresAt
         await this.prisma.quotation.update({
             where: { id: quotationId },
             data: {
                 status: finalStatus as any,
-                sentAt: new Date(),
+                sentAt: now,
                 expiresAt,
+                validUntil: expiresAt,
+                terms: [quotation.terms, `[System] Reminder At: ${reminderAt.toISOString()}`].filter(Boolean).join('\n'),
             },
         });
 

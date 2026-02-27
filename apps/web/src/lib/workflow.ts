@@ -81,6 +81,13 @@ function isPaid(order?: WorkflowOrder | null): boolean {
     return Boolean(order.payments?.some((p) => PAID_PAYMENT_STATUSES.has(normalize(p.status))));
 }
 
+function isFullyPaid(order?: WorkflowOrder | null): boolean {
+    if (!order) return false;
+    const total = Number(order.totalAmount || 0);
+    const paid = Number(order.paidAmount || 0);
+    return total > 0 && paid >= total;
+}
+
 function isOpsForwarded(order?: WorkflowOrder | null): boolean {
     if (!order) return false;
     if (order.forwardedToOpsAt) return true;
@@ -96,7 +103,7 @@ function isPaymentLinkSent(order?: WorkflowOrder | null): boolean {
 function canonicalFromQuotationStatus(rawStatus?: string | null): CanonicalWorkflowStatus | null {
     const status = normalize(rawStatus);
     if (!status) return null;
-    if (['counter', 'countered', 'counter_offer'].includes(status)) return 'COUNTER';
+    if (['counter', 'countered', 'counter_offer'].includes(status)) return 'FINAL';
     if (['final', 'final_offer', 'negotiating'].includes(status)) return 'FINAL';
     if (['quoted', 'sent'].includes(status)) return 'QUOTED';
     if (status === 'accepted') return 'ACCEPTED_PAYMENT_PENDING';
@@ -108,18 +115,17 @@ export function deriveCanonicalWorkflowStatus(input: WorkflowInput): CanonicalWo
     const order = input.order || null;
     if (order) {
         const orderStatus = normalize(order.status);
-        const opsFinal = normalize(order.opsFinalCheckStatus);
         const paid = isPaid(order);
+        const fullyPaid = isFullyPaid(order);
         const forwarded = isOpsForwarded(order);
         const linkSent = isPaymentLinkSent(order);
 
-        if (opsFinal === 'rejected') return 'CLOSED_DECLINED';
         if (CLOSED_LOST_ORDER_STATUSES.has(orderStatus)) return 'CLOSED_DECLINED';
-        if (CLOSED_WON_ORDER_STATUSES.has(orderStatus) && paid) return 'CLOSED_ACCEPTED';
+        if (CLOSED_WON_ORDER_STATUSES.has(orderStatus) && fullyPaid) return 'CLOSED_ACCEPTED';
+        if (fullyPaid && (forwarded || orderStatus === 'confirmed')) return 'CLOSED_ACCEPTED';
         if (OPS_PROCESSING_ORDER_STATUSES.has(orderStatus)) return 'IN_OPS_PROCESSING';
         if (paid && forwarded) return 'READY_FOR_OPS';
         if (paid) return 'PAID_CONFIRMED';
-        if (opsFinal === 'pending') return 'ACCEPTED_PENDING_OPS_RECHECK';
         if (linkSent) return 'PAYMENT_LINK_SENT';
         return 'ACCEPTED_PAYMENT_PENDING';
     }
@@ -138,14 +144,15 @@ export function deriveCanonicalWorkflowStatus(input: WorkflowInput): CanonicalWo
 
 export function deriveSalesModuleStatus(input: WorkflowInput): CanonicalWorkflowStatus {
     const canonical = deriveCanonicalWorkflowStatus(input);
-    if (canonical === 'PAID_CONFIRMED' || canonical === 'READY_FOR_OPS' || canonical === 'IN_OPS_PROCESSING') {
+    const fullyPaid = isFullyPaid(input.order || null);
+    if (fullyPaid && (canonical === 'PAID_CONFIRMED' || canonical === 'READY_FOR_OPS' || canonical === 'IN_OPS_PROCESSING')) {
         return 'CLOSED_ACCEPTED';
     }
     return canonical;
 }
 
 export function canUseNegotiationChat(status: CanonicalWorkflowStatus): boolean {
-    return status === 'QUOTED' || status === 'COUNTER';
+    return status === 'QUOTED';
 }
 
 export function latestQuotationForThread<T>(
@@ -183,9 +190,7 @@ export function deriveOfferIterations<T extends {
     return sorted.map((q, idx) => {
         const status = normalize(q.status);
         let type: OfferIteration['type'] = 'INITIAL';
-        if (['counter', 'countered', 'counter_offer'].includes(status)) {
-            type = 'COUNTER';
-        } else if (['final', 'final_offer', 'negotiating'].includes(status) || idx === lastIdx) {
+        if (['final', 'final_offer', 'negotiating'].includes(status) || idx === lastIdx) {
             type = idx === 0 ? 'INITIAL' : 'FINAL';
         }
         return {

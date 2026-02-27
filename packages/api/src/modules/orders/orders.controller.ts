@@ -33,15 +33,6 @@ export class OrdersController {
         return this.ordersService.rejectQuotation(id, req.user.id, body.reason);
     }
 
-    @Post('quotations/:id/counter')
-    async counterOffer(
-        @Param('id') id: string,
-        @Request() req: { user: { id: string } },
-        @Body('items') items: Array<{ cartItemId: string; finalUnitPrice: number }>,
-    ) {
-        return this.ordersService.counterOffer(id, req.user.id, items);
-    }
-
     @Get('tracker/:cartId')
     async getQuotationTracker(@Param('cartId') cartId: string) {
         return this.salesService.getQuotationTracker(cartId);
@@ -71,11 +62,16 @@ export class OrdersController {
         return this.ordersService.getOrder(id, req.user.id);
     }
 
+    @Get(':id/payment-policy')
+    async getPaymentPolicy(@Param('id') id: string, @Request() req: { user: { id: string } }) {
+        return this.ordersService.getPaymentPolicy(id, req.user.id);
+    }
+
     @Post(':id/pay')
     async initiatePayment(
         @Param('id') id: string,
         @Request() req: { user: { id: string } },
-        @Body() body: { method: 'card' | 'bank_transfer' | 'upi'; amount: number; transactionRef?: string },
+        @Body() body: { method: 'card' | 'bank_transfer' | 'upi'; amount: number; paymentType?: 'advance' | 'balance'; transactionRef?: string },
     ) {
         return this.ordersService.initiatePayment(id, req.user.id, body);
     }

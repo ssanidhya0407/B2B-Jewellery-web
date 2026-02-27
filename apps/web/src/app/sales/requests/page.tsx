@@ -154,8 +154,8 @@ export default function SalesRequestsPage() {
         return activeList.filter((r) => {
             const status = getCanonicalForRequest(r);
             if (filter === 'reviewing') return ['SUBMITTED', 'UNDER_REVIEW', 'OPS_FORWARDED'].includes(status);
-            if (filter === 'quoted') return ['QUOTED', 'COUNTER', 'FINAL'].includes(status);
-            if (filter === 'payment') return ['ACCEPTED_PENDING_OPS_RECHECK', 'ACCEPTED_PAYMENT_PENDING', 'PAYMENT_LINK_SENT', 'PAID_CONFIRMED'].includes(status);
+            if (filter === 'quoted') return ['QUOTED', 'FINAL'].includes(status);
+            if (filter === 'payment') return ['ACCEPTED_PAYMENT_PENDING', 'PAYMENT_LINK_SENT', 'PAID_CONFIRMED'].includes(status);
             if (filter === 'ready_ops') return status === 'READY_FOR_OPS' || status === 'IN_OPS_PROCESSING';
             if (filter === 'closed_accepted') return status === 'CLOSED_ACCEPTED';
             if (filter === 'closed_declined') return status === 'CLOSED_DECLINED';
@@ -193,8 +193,8 @@ export default function SalesRequestsPage() {
         const list = activeList;
         const canonical = list.map((r) => getCanonicalForRequest(r));
         const reviewing = canonical.filter((s) => ['SUBMITTED', 'UNDER_REVIEW', 'OPS_FORWARDED'].includes(s)).length;
-        const quoted = canonical.filter((s) => ['QUOTED', 'COUNTER', 'FINAL'].includes(s)).length;
-        const payment = canonical.filter((s) => ['ACCEPTED_PENDING_OPS_RECHECK', 'ACCEPTED_PAYMENT_PENDING', 'PAYMENT_LINK_SENT', 'PAID_CONFIRMED'].includes(s)).length;
+        const quoted = canonical.filter((s) => ['QUOTED', 'FINAL'].includes(s)).length;
+        const payment = canonical.filter((s) => ['ACCEPTED_PAYMENT_PENDING', 'PAYMENT_LINK_SENT', 'PAID_CONFIRMED'].includes(s)).length;
         const readyOps = canonical.filter((s) => ['READY_FOR_OPS', 'IN_OPS_PROCESSING'].includes(s)).length;
         const closedAccepted = canonical.filter((s) => s === 'CLOSED_ACCEPTED').length;
         const closedDeclined = canonical.filter((s) => s === 'CLOSED_DECLINED').length;
@@ -356,7 +356,7 @@ export default function SalesRequestsPage() {
                                 const buyerName =
                                     [req.user.firstName, req.user.lastName].filter(Boolean).join(' ') || req.user.email;
                                 const canonical = getCanonicalForRequest(req);
-                                const isAlreadyQuoted = ['QUOTED', 'COUNTER', 'FINAL', 'ACCEPTED_PENDING_OPS_RECHECK', 'ACCEPTED_PAYMENT_PENDING', 'PAYMENT_LINK_SENT', 'PAID_CONFIRMED', 'READY_FOR_OPS', 'IN_OPS_PROCESSING', 'CLOSED_ACCEPTED', 'CLOSED_DECLINED'].includes(canonical);
+                                const isAlreadyQuoted = ['QUOTED', 'FINAL', 'ACCEPTED_PAYMENT_PENDING', 'PAYMENT_LINK_SENT', 'PAID_CONFIRMED', 'READY_FOR_OPS', 'IN_OPS_PROCESSING', 'CLOSED_ACCEPTED', 'CLOSED_DECLINED'].includes(canonical);
                                 const canQuickQuote = !['CLOSED_ACCEPTED', 'CLOSED_DECLINED'].includes(canonical) && !isAlreadyQuoted && Boolean(req.assignedAt);
 
                                 return (
